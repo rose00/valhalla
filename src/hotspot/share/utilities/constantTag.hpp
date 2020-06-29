@@ -104,16 +104,32 @@ class constantTag {
   bool is_method_handle() const     { return _tag == JVM_CONSTANT_MethodHandle; }
   bool is_dynamic_constant() const  { return _tag == JVM_CONSTANT_Dynamic; }
   bool is_invoke_dynamic() const    { return _tag == JVM_CONSTANT_InvokeDynamic; }
+  bool is_variant_parameter() const { return _tag == JVM_CONSTANT_Parameter; }
+  bool is_variant_linkage() const   { return _tag == JVM_CONSTANT_Linkage; }
 
   bool has_bootstrap() const {
+    return (has_bootstrap_and_descriptor() ||
+            _tag == JVM_CONSTANT_Parameter);
+  }
+  bool has_bootstrap_and_descriptor() const {
     return (_tag == JVM_CONSTANT_Dynamic ||
             _tag == JVM_CONSTANT_DynamicInError ||
             _tag == JVM_CONSTANT_InvokeDynamic);
   }
 
+  bool is_nominal() const {
+    return is_klass_or_reference() || is_field_or_method();
+  }
+
+  bool can_have_variant_linkage() const {
+    //return is_nominal(); //@@ maybe later
+    return is_method() || is_interface_method();  //@@ for now
+  }
+
   bool is_loadable_constant() const {
     return ((_tag >= JVM_CONSTANT_Integer && _tag <= JVM_CONSTANT_String) ||
             is_method_type() || is_method_handle() || is_dynamic_constant() ||
+            is_variant_parameter() ||
             is_unresolved_klass());
   }
 

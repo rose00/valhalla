@@ -2090,6 +2090,7 @@ typedef HashtableEntry<InstanceKlass*, mtClass>  KlassHashtableEntry;
   declare_constant(JVM_ACC_FIELD_MODIFICATION_WATCHED)                    \
   declare_constant(JVM_ACC_FIELD_INTERNAL)                                \
   declare_constant(JVM_ACC_FIELD_STABLE)                                  \
+  declare_constant(JVM_ACC_FIELD_PARAMETRIC)                              \
   declare_constant(JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE)                   \
                                                                           \
   declare_constant(JVM_CONSTANT_Utf8)                                     \
@@ -2197,12 +2198,15 @@ typedef HashtableEntry<InstanceKlass*, mtClass>  KlassHashtableEntry;
   declare_constant(ConstMethod::_has_checked_exceptions)                  \
   declare_constant(ConstMethod::_has_localvariable_table)                 \
   declare_constant(ConstMethod::_has_exception_table)                     \
-  declare_constant(ConstMethod::_has_generic_signature)                   \
+  declare_constant(ConstMethod::_has_generic_signature_or_constant)       \
   declare_constant(ConstMethod::_has_method_parameters)                   \
   declare_constant(ConstMethod::_has_method_annotations)                  \
   declare_constant(ConstMethod::_has_parameter_annotations)               \
   declare_constant(ConstMethod::_has_default_annotations)                 \
   declare_constant(ConstMethod::_has_type_annotations)                    \
+  declare_constant(ConstMethod::_generic_signature_index_word)            \
+  declare_constant(ConstMethod::_generic_signature_constant_word)         \
+  declare_constant(ConstMethod::_generic_signature_word_count)            \
                                                                           \
   /**************/                                                        \
   /* DataLayout */                                                        \

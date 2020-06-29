@@ -116,8 +116,10 @@ int ConstMethod::size(int code_size,
     extra_bytes += sizeof(u2);
     extra_bytes += sizes->exception_table_length() * sizeof(ExceptionTableElement);
   }
-  if (sizes->generic_signature_index() != 0) {
-    extra_bytes += sizeof(u2);
+  if (sizes->generic_signature_index() != 0 ||
+      sizes->parametric_constant_index() != 0) {
+    // these go together under one flag bit
+    extra_bytes += sizeof(u2) * _generic_signature_word_count;
   }
   // This has to be a less-than-or-equal check, because we might be
   // storing information from a zero-length MethodParameters
@@ -175,14 +177,19 @@ u2* ConstMethod::last_u2_element() const {
 
 u2* ConstMethod::generic_signature_index_addr() const {
   // Located at the end of the constMethod.
-  assert(has_generic_signature(), "called only if generic signature exists");
-  return last_u2_element();
+  assert(has_generic_signature_or_constant(), "called only if generic signature exists");
+  return last_u2_element() - 1 + _generic_signature_index_word;
+}
+
+u2* ConstMethod::parametric_constant_index_addr() const {
+  // Located at the end of the constMethod.
+  assert(has_generic_signature_or_constant(), "called only if parametric constant exists");
+  return last_u2_element() - 1 + _generic_signature_constant_word;
 }
 
 u2* ConstMethod::method_parameters_length_addr() const {
   assert(has_method_parameters(), "called only if table is present");
-  return has_generic_signature() ? (last_u2_element() - 1) :
-                                    last_u2_element();
+  return last_u2_element_not_generic_signature();
 }
 
 u2* ConstMethod::checked_exceptions_length_addr() const {
@@ -193,8 +200,7 @@ u2* ConstMethod::checked_exceptions_length_addr() const {
     return (u2*)method_parameters_start() - 1;
   } else {
     // Else, the exception table is at the end of the constMethod.
-    return has_generic_signature() ? (last_u2_element() - 1) :
-                                     last_u2_element();
+    return last_u2_element_not_generic_signature();
   }
 }
 
@@ -209,8 +215,7 @@ u2* ConstMethod::exception_table_length_addr() const {
       return (u2*)method_parameters_start() - 1;
     } else {
       // Else, the exception table is at the end of the constMethod.
-      return has_generic_signature() ? (last_u2_element() - 1) :
-                                        last_u2_element();
+      return last_u2_element_not_generic_signature();
     }
   }
 }
@@ -230,8 +235,7 @@ u2* ConstMethod::localvariable_table_length_addr() const {
         return (u2*)method_parameters_start() - 1;
       } else {
         // Else, the exception table is at the end of the constMethod.
-      return has_generic_signature() ? (last_u2_element() - 1) :
-                                        last_u2_element();
+      return last_u2_element_not_generic_signature();
       }
     }
   }
@@ -242,8 +246,9 @@ void ConstMethod::set_inlined_tables_length(InlineTableSizes* sizes) {
   _flags = 0;
   if (sizes->compressed_linenumber_size() > 0)
     _flags |= _has_linenumber_table;
-  if (sizes->generic_signature_index() != 0)
-    _flags |= _has_generic_signature;
+  if (sizes->generic_signature_index() != 0 ||
+      sizes->parametric_constant_index() != 0)
+    _flags |= _has_generic_signature_or_constant;
   if (sizes->method_parameters_length() >= 0)
     _flags |= _has_method_parameters;
   if (sizes->checked_exceptions_length() > 0)
@@ -276,8 +281,11 @@ void ConstMethod::set_inlined_tables_length(InlineTableSizes* sizes) {
   // Also, the servicability agent needs to be informed anytime
   // anything is added here.  It might be advisable to have some sort
   // of indication of this inline.
-  if (sizes->generic_signature_index() != 0)
+  if (sizes->generic_signature_index() != 0 ||
+      sizes->parametric_constant_index() != 0) {
     *(generic_signature_index_addr()) = sizes->generic_signature_index();
+    *(parametric_constant_index_addr()) = sizes->parametric_constant_index();
+  }
   // New data should probably go here.
   if (sizes->method_parameters_length() >= 0)
     *(method_parameters_length_addr()) = sizes->method_parameters_length();

@@ -116,6 +116,9 @@ class ConstantPool : public Metadata {
   // Constant pool index to the utf8 entry of the Generic signature,
   // or 0 if none.
   u2              _generic_signature_index;
+  // CONSTANT_Parameter that this class was declared Parametric in,
+  // or 0 if none.
+  u2              _parametric_constant_index;
   // Constant pool index to the utf8 entry for the name of source file
   // containing this klass, 0 if not specified.
   u2              _source_file_name_index;
@@ -213,6 +216,8 @@ class ConstantPool : public Metadata {
   }
   u2 generic_signature_index() const                   { return _generic_signature_index; }
   void set_generic_signature_index(u2 sig_index)       { _generic_signature_index = sig_index; }
+  u2 parametric_constant_index() const                 { return _parametric_constant_index; }
+  void set_parametric_constant_index(u2 pc_index)      { _parametric_constant_index = pc_index; }
 
   // source file name
   Symbol* source_file_name() const {
@@ -350,6 +355,16 @@ class ConstantPool : public Metadata {
   void invoke_dynamic_at_put(int which, int bsms_attribute_index, int name_and_type_index) {
     tag_at_put(which, JVM_CONSTANT_InvokeDynamic);
     *int_at_addr(which) = ((jint) name_and_type_index<<16) | bsms_attribute_index;
+  }
+
+  void variant_parameter_index_at_put(int which, int bsms_attribute_index, int parent_index) {
+    tag_at_put(which, JVM_CONSTANT_Parameter);
+    *int_at_addr(which) = ((jint) parent_index<<16) | bsms_attribute_index;
+  }
+
+  void variant_linkage_index_at_put(int which, int constant_index, int ref_index) {
+    tag_at_put(which, JVM_CONSTANT_Linkage);
+    *int_at_addr(which) = ((jint) constant_index<<16) | ref_index;
   }
 
   void unresolved_string_at_put(int which, Symbol* s) {
@@ -553,15 +568,52 @@ class ConstantPool : public Metadata {
            tag_at(which).is_method_handle_in_error(), "Corrupted constant pool");
     return extract_low_short_from_int(*int_at_addr(which));  // mask out unwanted ref_index bits
   }
-  int method_handle_index_at(int which) {
+  int method_handle_ref_index_at(int which) {
     assert(tag_at(which).is_method_handle() ||
            tag_at(which).is_method_handle_in_error(), "Corrupted constant pool");
     return extract_high_short_from_int(*int_at_addr(which));  // shift out unwanted ref_kind bits
   }
+  #define method_handle_index_at method_handle_ref_index_at  //@@
   int method_type_index_at(int which) {
     assert(tag_at(which).is_method_type() ||
            tag_at(which).is_method_type_in_error(), "Corrupted constant pool");
     return *int_at_addr(which);
+  }
+
+  int variant_parameter_parent_index_at(int which) {
+    assert(tag_at(which).is_variant_parameter(), "Corrupted constant pool");
+    return extract_high_short_from_int(*int_at_addr(which));
+  }
+
+  int variant_linkage_constant_index_at(int which) {
+    assert(tag_at(which).is_variant_linkage(), "Corrupted constant pool");
+    return extract_low_short_from_int(*int_at_addr(which));
+  }
+
+  int variant_linkage_ref_index_at(int which) {
+    assert(tag_at(which).is_variant_linkage(), "Corrupted constant pool");
+    return extract_high_short_from_int(*int_at_addr(which));
+  }
+
+  // Map a possible CONSTANT_Linkage to the invariant reference it wraps.
+  // If the constant is already a Methodref, etc., just return unchanged.
+  int invariant_ref_index_at(int which, bool verify = false) {
+    // The verify flag is passed from code in the CP verifier itself.
+    // If requested verification fails, we return 'which' unchanged.
+    // After loading, verification is assumed to be already done.
+    if (!verify || is_within_bounds(which)) {
+      if (tag_at(which).is_variant_linkage()) {
+        int ref_index = variant_linkage_ref_index_at(which);
+        if (!verify || is_within_bounds(ref_index)) {
+          assert(verify || tag_at(ref_index).can_have_variant_linkage(),
+                 "Corrupted constant pool");
+          return ref_index;
+        }
+      }
+      assert(tag_at(which).is_nominal(),
+             "Invariance is derivable only for symbolic refs");
+    }
+    return which;
   }
 
   // Derived queries:
@@ -583,7 +635,7 @@ class ConstantPool : public Metadata {
   }
 
   int bootstrap_name_and_type_ref_index_at(int which) {
-    assert(tag_at(which).has_bootstrap(), "Corrupted constant pool");
+    assert(tag_at(which).has_bootstrap_and_descriptor(), "Corrupted constant pool");
     return extract_high_short_from_int(*int_at_addr(which));
   }
   int bootstrap_methods_attribute_index(int which) {

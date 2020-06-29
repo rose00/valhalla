@@ -1599,6 +1599,7 @@ methodHandle Method::clone_with_new_data(const methodHandle& m, u_char* new_code
       checked_exceptions_len,
       method_parameters_len,
       cm->generic_signature_index(),
+      cm->parametric_constant_index(),
       method_annotations_len,
       parameter_annotations_len,
       type_annotations_len,

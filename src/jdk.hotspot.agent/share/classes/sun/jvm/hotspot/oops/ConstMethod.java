@@ -51,6 +51,7 @@ public class ConstMethod extends Metadata {
   private static int HAS_LOCALVARIABLE_TABLE;
   private static int HAS_EXCEPTION_TABLE;
   private static int HAS_GENERIC_SIGNATURE;
+  private static int GENERIC_SIGNATURE_SIZE;
   private static int HAS_METHOD_ANNOTATIONS;
   private static int HAS_PARAMETER_ANNOTATIONS;
   private static int HAS_METHOD_PARAMETERS;
@@ -70,7 +71,8 @@ public class ConstMethod extends Metadata {
     HAS_CHECKED_EXCEPTIONS     = db.lookupIntConstant("ConstMethod::_has_checked_exceptions").intValue();
     HAS_LOCALVARIABLE_TABLE   = db.lookupIntConstant("ConstMethod::_has_localvariable_table").intValue();
     HAS_EXCEPTION_TABLE       = db.lookupIntConstant("ConstMethod::_has_exception_table").intValue();
-    HAS_GENERIC_SIGNATURE     = db.lookupIntConstant("ConstMethod::_has_generic_signature").intValue();
+    HAS_GENERIC_SIGNATURE     = db.lookupIntConstant("ConstMethod::_has_generic_signature_or_constant").intValue();
+    GENERIC_SIGNATURE_SIZE    = db.lookupIntConstant("ConstMethod::_generic_signature_word_count").intValue() * sizeofShort;
     HAS_METHOD_ANNOTATIONS    = db.lookupIntConstant("ConstMethod::_has_method_annotations").intValue();
     HAS_PARAMETER_ANNOTATIONS = db.lookupIntConstant("ConstMethod::_has_parameter_annotations").intValue();
     HAS_METHOD_PARAMETERS = db.lookupIntConstant("ConstMethod::_has_method_parameters").intValue();
@@ -462,14 +464,14 @@ public class ConstMethod extends Metadata {
 
   // Offset of the generic signature index
   private long offsetOfGenericSignatureIndex() {
-    return offsetOfLastU2Element();
+    return offsetOfLastU2Element() + sizeofShort - GENERIC_SIGNATURE_SIZE;
   }
 
   private long offsetOfMethodParametersLength() {
     if (Assert.ASSERTS_ENABLED) {
       Assert.that(hasMethodParameters(), "should only be called if table is present");
     }
-    return hasGenericSignature() ? offsetOfLastU2Element() - sizeofShort :
+    return hasGenericSignature() ? offsetOfLastU2Element() - GENERIC_SIGNATURE_SIZE :
                                    offsetOfLastU2Element();
   }
 
@@ -495,7 +497,7 @@ public class ConstMethod extends Metadata {
     if (hasMethodParameters())
       return offsetOfMethodParameters() - sizeofShort;
     else {
-      return hasGenericSignature() ? offsetOfLastU2Element() - sizeofShort :
+      return hasGenericSignature() ? offsetOfLastU2Element() - GENERIC_SIGNATURE_SIZE :
                                      offsetOfLastU2Element();
     }
   }
@@ -552,7 +554,7 @@ public class ConstMethod extends Metadata {
     } else if (hasMethodParameters()) {
       return offsetOfMethodParameters() - sizeofShort;
     } else {
-      return hasGenericSignature() ? offsetOfLastU2Element() - sizeofShort :
+      return hasGenericSignature() ? offsetOfLastU2Element() - GENERIC_SIGNATURE_SIZE :
                                      offsetOfLastU2Element();
     }
   }
@@ -584,7 +586,7 @@ public class ConstMethod extends Metadata {
     } else if (hasMethodParameters()) {
       return offsetOfMethodParameters() - sizeofShort;
     } else {
-      return hasGenericSignature() ? offsetOfLastU2Element() - sizeofShort :
+      return hasGenericSignature() ? offsetOfLastU2Element() - GENERIC_SIGNATURE_SIZE :
                                      offsetOfLastU2Element();
     }
   }

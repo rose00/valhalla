@@ -1046,6 +1046,8 @@ public:
   Symbol* generic_signature() const                   { return _constants->generic_signature(); }
   u2 generic_signature_index() const                  { return _constants->generic_signature_index(); }
   void set_generic_signature_index(u2 sig_index)      { _constants->set_generic_signature_index(sig_index); }
+  u2 parametric_constant_index() const                { return _constants->parametric_constant_index(); }
+  void set_parametric_constant_index(u2 pc_index)     { _constants->set_parametric_constant_index(pc_index); }
 
   u2 enclosing_method_data(int offset) const;
   u2 enclosing_method_class_index() const {

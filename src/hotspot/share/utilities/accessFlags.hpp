@@ -84,7 +84,8 @@ enum {
   JVM_ACC_FIELD_MODIFICATION_WATCHED      = 0x00008000, // field modification is watched by JVMTI
   JVM_ACC_FIELD_INTERNAL                  = 0x00000400, // internal field, same as JVM_ACC_ABSTRACT
   JVM_ACC_FIELD_STABLE                    = 0x00000020, // @Stable field, same as JVM_ACC_SYNCHRONIZED and JVM_ACC_SUPER
-  JVM_ACC_FIELD_INITIALIZED_FINAL_UPDATE  = 0x00000200, // (static) final field updated outside (class) initializer, same as JVM_ACC_NATIVE
+  JVM_ACC_FIELD_PARAMETRIC                = 0x00000100, // parametric field, same as JVM_ACC_NATIVE
+  JVM_ACC_FIELD_INITIALIZED_FINAL_UPDATE  = 0x00000200, // (static) final field updated outside (class) initializer, same as JVM_ACC_INTERFACE
   JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE     = 0x00000800, // field has generic signature
   JVM_ACC_FIELD_INLINED                   = 0x00008000, // field is inlined
 
@@ -92,6 +93,7 @@ enum {
                                        JVM_ACC_FIELD_MODIFICATION_WATCHED |
                                        JVM_ACC_FIELD_INTERNAL |
                                        JVM_ACC_FIELD_STABLE |
+                                       JVM_ACC_FIELD_PARAMETRIC |
                                        JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE |
                                        JVM_ACC_FIELD_INLINED,
 
@@ -169,6 +171,7 @@ class AccessFlags {
   bool on_stack() const                 { return (_flags & JVM_ACC_ON_STACK) != 0; }
   bool is_internal() const              { return (_flags & JVM_ACC_FIELD_INTERNAL) != 0; }
   bool is_stable() const                { return (_flags & JVM_ACC_FIELD_STABLE) != 0; }
+  bool is_parametric() const            { return (_flags & JVM_ACC_FIELD_PARAMETRIC) != 0; }
   bool field_has_generic_signature() const
                                         { return (_flags & JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE) != 0; }
 
@@ -258,6 +261,11 @@ class AccessFlags {
   void set_field_has_generic_signature()
                                        {
                                          atomic_set_bits(JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE);
+                                       }
+
+  void set_field_is_parametric()
+                                       {
+                                         atomic_set_bits(JVM_ACC_FIELD_PARAMETRIC);
                                        }
 
   void set_on_stack(const bool value)

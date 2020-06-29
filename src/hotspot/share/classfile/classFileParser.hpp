@@ -86,10 +86,12 @@ class FieldLayoutInfo : public ResourceObj {
 class ClassFileParser {
   friend class FieldLayoutBuilder;
   friend class FieldLayout;
+  friend class SegmentInfo;
 
   class ClassAnnotationCollector;
   class FieldAllocationCount;
   class FieldAnnotationCollector;
+  class SegmentInfo;
 
  public:
   // The ClassFileParser has an associated "publicity" level
@@ -218,15 +220,61 @@ class ClassFileParser {
   bool _has_finalizer;
   bool _has_empty_finalizer;
   bool _has_vanilla_constructor;
+
+  // segmentation logic for generic specializaiton
+  int _segment_count;      // count of CONSTANT_Parameter entries
+  int* _segment_to_constant_map;   // tentatively ordered list of CONSTANT_Parameters
+  int* _constant_to_segment_map;  // non-null if there are segments
+  int* _field_parameter_indexes;  // temporary list of Parametric values for fields
+  int _class_parametric_constant_index;  // this class's Parametric attribute if any
+  SegmentInfo** _segments;  // one per CONSTANT_Parameter entry
+  SegmentInfo* segment_info(int segnum) const {
+    assert(is_valid_segment_number(segnum, true), "oob");
+    assert(_segments[segnum] != NULL, "must be populated");
+    return _segments[segnum];
+  }
+  int segment_for_constant(int cp_index, bool allow_tbd = false) const {
+    assert(_segment_count > 0 && _constant_to_segment_map != NULL, "init");
+    assert(_segments != NULL, "do not report numbers prematurely");
+    assert(cp_index > 0 && cp_index < _cp->length(), "oob");
+    int segnum = _constant_to_segment_map[cp_index];
+    assert(allow_tbd || is_valid_segment_number(segnum), "_constant_to_segment_map not ready");
+    return segnum;
+  }
+  void set_segment_for_constant(int cp_index, int segnum) {
+    int prev = segment_for_constant(cp_index);  // trigger asserts
+    // Note:  segnum might be "colored" as a negative number
+    assert(segnum < 0 || is_valid_segment_number(segnum), "oob");
+    _constant_to_segment_map[cp_index] = segnum;
+  }
+  static const int SEG_NONE    = 0;    // default entry in _constant_to_segment_map
+  static const int SEG_MIN     = 1;    // first segment index (they are one-based!)
+  static const int SEG_TBD     = -1;   // sentinel *value* to initiate computation
+  static const int SEG_WORKING = -5 << 24;  // sentinel *bits* for circularity check
+  bool is_valid_segment_number(int segnum, bool reject_zero = false) const {
+    assert(has_segments(), "");
+    return (segnum >= (reject_zero ? SEG_MIN : SEG_NONE) && segnum <= segment_max());
+  }
+  bool has_segments() const {
+    assert(_segment_count >= 0, "we have not looked for segments yet");
+    return _segment_count > 0;
+  }
+  int segment_max() const {
+    assert(has_segments(), "");
+    return _segment_count;
+  }
+
   int _max_bootstrap_specifier_index;  // detects BSS values
 
   void parse_stream(const ClassFileStream* const stream, TRAPS);
 
   void mangle_hidden_class_name(InstanceKlass* const ik);
 
-  void post_process_parsed_stream(const ClassFileStream* const stream,
-                                  ConstantPool* cp,
-                                  TRAPS);
+  void post_parse_processing(TRAPS);
+
+  void setup_segment_maps(int cp_length, TRAPS);
+  void find_constant_pool_segments(TRAPS);
+  void check_constant_pool_segments(TRAPS);
 
   void prepend_host_package_name(const InstanceKlass* unsafe_anonymous_host, TRAPS);
   void fix_unsafe_anonymous_class_name(TRAPS);
@@ -241,6 +289,7 @@ class ClassFileParser {
   void set_class_synthetic_flag(bool x)        { _synthetic_flag = x; }
   void set_class_sourcefile_index(u2 x)        { _sourcefile_index = x; }
   void set_class_generic_signature_index(u2 x) { _generic_signature_index = x; }
+  void set_class_parametric_constant_index(u2 x) { _class_parametric_constant_index = x; }
   void set_class_sde_buffer(const char* x, int len)  { _sde_buffer = x; _sde_length = len; }
 
   void create_combined_annotations(TRAPS);
@@ -281,6 +330,7 @@ class ClassFileParser {
                               u2* const constantvalue_index_addr,
                               bool* const is_synthetic_addr,
                               u2* const generic_signature_index_addr,
+                              u2* const parametric_index_addr,
                               FieldAnnotationCollector* parsed_annotations,
                               TRAPS);
 
@@ -334,10 +384,17 @@ class ClassFileParser {
 
   // Classfile attribute parsing
   u2 parse_generic_signature_attribute(const ClassFileStream* const cfs, TRAPS);
+  u2 parse_parametric_attribute(const ClassFileStream* const cfs, TRAPS);
   void parse_classfile_sourcefile_attribute(const ClassFileStream* const cfs, TRAPS);
   void parse_classfile_source_debug_extension_attribute(const ClassFileStream* const cfs,
                                                         int length,
                                                         TRAPS);
+
+  void parse_parametric_attribute(const ClassFileStream* const cfs,
+                                  const char* where,
+                                  u4 attribute_length,
+                                  u2 *parametric_attribute_addr,
+                                  TRAPS);
 
   u2   parse_classfile_inner_classes_attribute(const ClassFileStream* const cfs,
                                                const u1* const inner_classes_attribute_start,

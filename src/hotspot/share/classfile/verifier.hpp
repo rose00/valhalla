@@ -41,6 +41,7 @@ class Verifier : AllStatic {
     INVOKEDYNAMIC_MAJOR_VERSION         = 51,
     NO_RELAX_ACCESS_CTRL_CHECK_VERSION  = 52,
     DYNAMICCONSTANT_MAJOR_VERSION       = 55,
+    SPECIES_LINKAGE_MAJOR_VERSION       = JVM_CLASSFILE_MAJOR_VERSION, //@@
   };
 
   // Verify the bytecodes for a class.

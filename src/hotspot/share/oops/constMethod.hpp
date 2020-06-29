@@ -79,7 +79,7 @@
 //     (see class MethodParametersElement)
 //     (access flags bit tells whether table is present)
 //     (indexed from end of ConstMethod*)
-//    [EMBEDDED generic signature index (u2)]
+//    [EMBEDDED generic signature and parametric constant indexes (u2, u2)]
 //     (indexed from end of constMethodOop)
 //    [EMBEDDED annotations arrays - method, parameter, type, default]
 //      pointer to Array<u1> if annotation is present
@@ -132,6 +132,7 @@ class AdapterHandlerEntry;
   do_element(checked_exceptions_length)         \
   do_element(method_parameters_length)          \
   do_element(generic_signature_index)           \
+  do_element(parametric_constant_index)         \
   do_element(method_annotations_length)         \
   do_element(parameter_annotations_length)      \
   do_element(type_annotations_length)           \
@@ -181,13 +182,19 @@ private:
     _has_checked_exceptions = 0x0002,
     _has_localvariable_table = 0x0004,
     _has_exception_table = 0x0008,
-    _has_generic_signature = 0x0010,
+    _has_generic_signature_or_constant = 0x0010,
     _has_method_parameters = 0x0020,
     _is_overpass = 0x0040,
     _has_method_annotations = 0x0080,
     _has_parameter_annotations = 0x0100,
     _has_type_annotations = 0x0200,
     _has_default_annotations = 0x0400
+  };
+
+  enum {       // u2[2] generic_signature_words = { gsig, segindex }
+    _generic_signature_index_word = 0,
+    _generic_signature_constant_word = 1,
+    _generic_signature_word_count = 2
   };
 
   // Bit vector of signature
@@ -244,8 +251,8 @@ public:
   // Inlined tables
   void set_inlined_tables_length(InlineTableSizes* sizes);
 
-  bool has_generic_signature() const
-    { return (_flags & _has_generic_signature) != 0; }
+  bool has_generic_signature_or_constant() const
+    { return (_flags & _has_generic_signature_or_constant) != 0; }
 
   bool has_linenumber_table() const
     { return (_flags & _has_linenumber_table) != 0; }
@@ -352,15 +359,27 @@ public:
 
   // generics support
   int generic_signature_index() const            {
-    if (has_generic_signature()) {
+    if (has_generic_signature_or_constant()) {
       return *generic_signature_index_addr();
     } else {
       return 0;
     }
   }
   void set_generic_signature_index(u2 index)    {
-    assert(has_generic_signature(), "");
+    assert(has_generic_signature_or_constant(), "");
     u2* addr = generic_signature_index_addr();
+    *addr = index;
+  }
+  int parametric_constant_index() const          {
+    if (has_generic_signature_or_constant()) {
+      return *parametric_constant_index_addr();
+    } else {
+      return 0;
+    }
+  }
+  void set_parametric_constant_index(u2 index)    {
+    assert(has_generic_signature_or_constant(), "");
+    u2* addr = parametric_constant_index_addr();
     *addr = index;
   }
 
@@ -391,6 +410,7 @@ public:
   // see class CompressedLineNumberReadStream.
   u_char* compressed_linenumber_table() const;         // not preserved by gc
   u2* generic_signature_index_addr() const;
+  u2* parametric_constant_index_addr() const;
   u2* checked_exceptions_length_addr() const;
   u2* localvariable_table_length_addr() const;
   u2* exception_table_length_addr() const;
@@ -551,6 +571,10 @@ private:
 
   // Last short in ConstMethod*
   u2* last_u2_element() const;
+  u2* last_u2_element_not_generic_signature() const {
+    return last_u2_element() - (has_generic_signature_or_constant()
+                                ? _generic_signature_word_count : 0);
+  }
 
  public:
   // Printing

@@ -171,6 +171,9 @@ void ClassFileParser::parse_constant_pool_entries(const ClassFileStream* const s
   unsigned int hashValues[SymbolTable::symbol_alloc_batch_size];
   int names_count = 0;
 
+  // detect CONSTANT_Parameter
+  int parameter_count = 0;
+
   // parsing  Index 0 is unused
   for (int index = 1; index < length; index++) {
     // Each of the following case guarantees one more byte in the stream
@@ -219,10 +222,10 @@ void ClassFileParser::parse_constant_pool_entries(const ClassFileStream* const s
             tag, CHECK);
         }
         if (tag == JVM_CONSTANT_MethodHandle) {
-          cfs->guarantee_more(4, CHECK);  // ref_kind, method_index, tag/access_flags
+          cfs->guarantee_more(4, CHECK);  // ref_kind, ref_index, tag/access_flags
           const u1 ref_kind = cfs->get_u1_fast();
-          const u2 method_index = cfs->get_u2_fast();
-          cp->method_handle_index_at_put(index, ref_kind, method_index);
+          const u2 ref_index = cfs->get_u2_fast();
+          cp->method_handle_index_at_put(index, ref_kind, ref_index);
         }
         else if (tag == JVM_CONSTANT_MethodType) {
           cfs->guarantee_more(3, CHECK);  // signature_index, tag/access_flags
@@ -262,6 +265,36 @@ void ClassFileParser::parse_constant_pool_entries(const ClassFileStream* const s
           _max_bootstrap_specifier_index = (int) bootstrap_specifier_index;  // collect for later
         }
         cp->invoke_dynamic_at_put(index, bootstrap_specifier_index, name_and_type_index);
+        break;
+      }
+      case JVM_CONSTANT_Parameter :
+      case JVM_CONSTANT_Linkage: {
+        if (_major_version < Verifier::SPECIES_LINKAGE_MAJOR_VERSION) {
+          classfile_parse_error(
+            "Class file version does not support constant tag %u in class file %s",
+            tag, CHECK);
+        }
+        if (tag == JVM_CONSTANT_Parameter) {
+          cfs->guarantee_more(5, CHECK);  // bsm_index, parent_index, tag/access_flags
+          // This constant has a BSM like CONSTANT_Dynamic.
+          const u2 bootstrap_specifier_index = cfs->get_u2_fast();
+          // But the second component is not a CONSTANT_NameAndType.
+          const u2 parent_index = cfs->get_u2_fast();
+          if (_max_bootstrap_specifier_index < (int) bootstrap_specifier_index) {
+            _max_bootstrap_specifier_index = (int) bootstrap_specifier_index;  // collect for later
+          }
+          parameter_count += 1;  // each CONSTANT_Parameter will create its own segment
+          cp->variant_parameter_index_at_put(index, bootstrap_specifier_index, parent_index);
+        }
+        else if (tag == JVM_CONSTANT_Linkage) {
+          cfs->guarantee_more(5, CHECK);  // constant_index, ref_index, tag/access_flags
+          const u2 constant_index = cfs->get_u2_fast();
+          const u2 ref_index = cfs->get_u2_fast();
+          cp->variant_linkage_index_at_put(index, constant_index, ref_index);
+        }
+        else {
+          ShouldNotReachHere();
+        }
         break;
       }
       case JVM_CONSTANT_Integer: {
@@ -378,6 +411,10 @@ void ClassFileParser::parse_constant_pool_entries(const ClassFileStream* const s
     } // end of switch(tag)
   } // end of for
 
+  // We now know whether we have variant segments or not.
+  assert(_segment_count == -1, "initialized to sentinel");
+  _segment_count = parameter_count;
+
   // Allocate the remaining symbols
   if (names_count > 0) {
     SymbolTable::new_symbols(_loader_data,
@@ -392,7 +429,6 @@ void ClassFileParser::parse_constant_pool_entries(const ClassFileStream* const s
   // Copy _current pointer of local copy back to stream.
   assert(stream->current() == old_current, "non-exclusive use of stream");
   stream->set_current(cfs1.current());
-
 }
 
 static inline bool valid_cp_range(int index, int length) {
@@ -424,6 +460,116 @@ void ClassFileParser::report_assert_property_failure(const char* msg,
 PRAGMA_DIAG_POP
 #endif
 
+// Support for specialized generics: CONSTANT_Parameter and split CP segments
+
+// This class also doubles as a holder for metadata cleanup.
+class ClassFileParser::SegmentInfo : public ResourceObj {
+  friend class ClassFileParser;
+private:
+  ClassFileParser* const _cfp;
+  ConstantPool* const _cp;
+  const int _segnum;
+  const int _parameter_index;
+  const int _parent_segnum;
+  int _depth;  // recursive number of parents; 1 if it is just me
+  static const int UNKNOWN_DEPTH = -1, FINDING_DEPTH = -2;
+  GrowableArray<int> _child_segnums;  // inverse of _parent_segnum
+  GrowableArray<int> _parametric_constants;
+  GrowableArray<int> _parametric_fields;
+  GrowableArray<int> _parametric_methods;
+
+public:
+  static const int MIN_DEPTH = 1;
+
+  SegmentInfo(ClassFileParser* cfp,
+              int segnum,
+              int parameter_index) :
+    _cfp(cfp), _cp(cfp->_cp),
+    _segnum(segnum),
+    _parameter_index(parameter_index),
+    _parent_segnum(_cp->variant_parameter_parent_index_at(parameter_index))
+  {
+    assert(_cp->tag_at(parameter_index).is_variant_parameter(), "");
+    assert(_cfp->segment_for_constant(parameter_index) == 0, "");
+    // seed the map for later traversal
+    cfp->set_segment_for_constant(parameter_index, segnum);
+    _depth = (has_parent() ? UNKNOWN_DEPTH : MIN_DEPTH);
+  }
+  ~SegmentInfo();
+
+  int segnum() const { return _segnum; }
+  int parameter_index() const { return _parameter_index; }
+  int parent_segnum() const { return _parent_segnum; }
+  bool has_parent() const { return _parent_segnum != 0; }
+  int depth() const { assert(_depth >= MIN_DEPTH, "init"); return _depth; }
+  SegmentInfo* parent() const { return _cfp->segment_info(_parent_segnum); }
+
+  bool depends_on(SegmentInfo* ancestor) {
+    assert(ancestor != NULL, "");
+    if (this == ancestor) {
+      return true;   // I always depend on myself
+    }
+    int my_depth       = this->depth();
+    int ancestor_depth = ancestor->depth();
+    if (ancestor_depth >= my_depth) {
+      return false;  // my ancestor must have fewer ancestors than me
+    }
+    // pop down a level and see where I end up
+    SegmentInfo* test = this;
+    for (int test_depth = my_depth; test_depth > ancestor_depth; ) {
+      if (!test->has_parent())  return false;  // shouldn't happen but...
+      test = test->parent();
+      test_depth -= 1;
+    }
+    return (test == ancestor);
+  }
+
+ private:
+  // Helper function detecting circularities.
+  // As a side effect, it computes _depth and _child_segnums.
+  bool check_parents(GrowableArray<int>& stack) {
+    if (_depth >= MIN_DEPTH)  return true;
+    if (has_parent() && parent() != this) {
+      parent()->_child_segnums.push(this->segnum());
+    }
+    bool error = false;
+    stack.clear();
+    SegmentInfo* next = this;
+    for (;;) {
+      assert(next->_depth == UNKNOWN_DEPTH && next->has_parent(), "");
+      next->_depth = FINDING_DEPTH;
+      SegmentInfo* parent = next->parent();
+      switch (parent->_depth) {
+      case UNKNOWN_DEPTH:
+        // must recursively visit the parent
+        stack.push(next->segnum());
+        next = parent;
+        continue;
+      case FINDING_DEPTH:
+        // parent is already on stack: found a cycle
+        assert(stack.contains(parent->segnum()), "must be");
+        error = true;
+        // set to an arbitrary (reasonably small) value
+        next->_depth = 2;
+        break;
+      default:
+        // parent has a known depth already; use it
+        next->_depth = parent->_depth + 1;
+        break;
+      }
+      // if there are loose ends, clean them up
+      if (stack.is_nonempty()) {
+        next = _cfp->segment_info(stack.pop());
+        continue;
+      }
+      // spot check that things ended up nice and tidy:
+      assert(this->_depth >= MIN_DEPTH, "");
+      assert(!this->has_parent() || this->parent()->_depth >= MIN_DEPTH, "");
+      return !error;
+    }
+  }
+};
+
 void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
                                          ConstantPool* const cp,
                                          const int length,
@@ -436,6 +582,12 @@ void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
   if (class_bad_constant_seen() != 0) {
     // a bad CP entry has been detected previously so stop parsing and just return.
     return;
+  }
+
+  int next_segnum = 0;
+  if (has_segments()) {
+    setup_segment_maps(length, CHECK);
+    next_segnum = SEG_MIN;
   }
 
   int index = 1;  // declared outside of loops for portability
@@ -528,7 +680,12 @@ void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
         break;
       }
       case JVM_CONSTANT_MethodHandle: {
-        const int ref_index = cp->method_handle_index_at(index);
+        if (next_segnum != 0) {
+          set_segment_for_constant(index, SEG_TBD);
+        }
+        const int ref_index = cp->invariant_ref_index_at(
+                                  cp->method_handle_ref_index_at(index),
+                                  /*verify=*/ true);
         check_property(valid_cp_range(ref_index, length),
           "Invalid constant pool index %u in class file %s",
           ref_index, CHECK);
@@ -599,6 +756,9 @@ void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
 
         // Mark the constant pool as having a CONSTANT_Dynamic_info structure
         cp->set_has_dynamic_constant();
+        if (next_segnum != 0) {
+          set_segment_for_constant(index, SEG_TBD);
+        }
         break;
       }
       case JVM_CONSTANT_InvokeDynamic: {
@@ -611,6 +771,45 @@ void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
           name_and_type_ref_index, CHECK);
         // bootstrap specifier index must be checked later,
         // when BootstrapMethods attr is available
+        if (next_segnum != 0) {
+          set_segment_for_constant(index, SEG_TBD);
+        }
+        break;
+      }
+      case JVM_CONSTANT_Parameter: {
+        const int parent_index =
+          cp->variant_parameter_parent_index_at(index);
+
+        if (parent_index != 0) {  // zero is a valid parent index (no parent)
+          check_property(valid_cp_range(parent_index, length) &&
+            cp->tag_at(parent_index).is_variant_parameter(),
+            "Invalid constant pool index %u in class file %s",
+            parent_index, CHECK);
+        }
+        // bootstrap specifier index must be checked later,
+        // when BootstrapMethods attr is available
+
+        assert(next_segnum != 0, "");
+        _segment_to_constant_map[next_segnum++] = index;
+        break;
+      }
+      case JVM_CONSTANT_Linkage: {
+        const int constant_index =
+          cp->variant_linkage_constant_index_at(index);
+        const int ref_index =
+          cp->variant_linkage_ref_index_at(index);
+
+        check_property(valid_cp_range(constant_index, length) &&
+          cp->tag_at(constant_index).is_loadable_constant(),
+          "Invalid constant pool index %u in class file %s",
+          constant_index, CHECK);
+        check_property(valid_cp_range(ref_index, length) &&
+          cp->tag_at(ref_index).can_have_variant_linkage(),
+          "Invalid constant pool index %u in class file %s",
+          ref_index, CHECK);
+        if (next_segnum != 0) {
+          set_segment_for_constant(index, SEG_TBD);
+        }
         break;
       }
       default: {
@@ -757,7 +956,7 @@ void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
         break;
       }
       case JVM_CONSTANT_MethodHandle: {
-        const int ref_index = cp->method_handle_index_at(index);
+        const int ref_index = cp->method_handle_ref_index_at(index);
         const int ref_kind = cp->method_handle_ref_kind_at(index);
         switch (ref_kind) {
           case JVM_REF_invokeVirtual:
@@ -893,7 +1092,507 @@ void ClassFileParser::patch_constant_pool(ConstantPool* cp,
 
   // On fall-through, mark the patch as used.
   clear_cp_patch_at(index);
+  if (has_segments()) {
+    set_segment_for_constant(index, 0);  // patched constant is never variant
+  }
 }
+
+void ClassFileParser::setup_segment_maps(int cp_length, TRAPS) {
+  {ResourceMark rm(THREAD); tty->print_cr("*** adding %d segments in %s", segment_max(), _class_name->as_C_string());} //@@
+
+  _constant_to_segment_map = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, int, cp_length);
+  memset(_constant_to_segment_map, 0, sizeof(_constant_to_segment_map[0]) * cp_length);
+
+  int spi_len = segment_max() + 1;  // segment numbers are 1-based
+  _segment_to_constant_map = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, int, spi_len);
+  memset(_segment_to_constant_map, 0, sizeof(_segment_to_constant_map[0]) * spi_len);
+}
+
+// For every constant X that depends in any way, directly or
+// indirectly, on a CONSTANT_Parameter P, assign that constant
+// to a segment associated with P.
+//
+// Such an X is called a *variant* constant, and may be
+// resolved more than once, for different specializations of
+// the CP segment(s) it depends on.
+//
+// Every CONSTANT_Parameter P is assigned to its own segment,
+// but if its bootstrap specifier is variant, it must be
+// variant in the segment of the declared parent Q of P.
+// The bootstrap cannot be variant in P's own segment, since
+// that would make bootstrapping impossible.
+// 
+// A constant can only depend on multiple parameters P, Q if P
+// depends on Q (or vice versa), and in that case X will
+// depend on P (or, vice versa, Q).
+//
+// Variance is always assigned as exactly as possible.
+// If a constant X does not depend on some P (directly or
+// indirectly), then X will not be assigned to P's segment,
+// nor to the segment of any child of P.
+// 
+// For every constant Y that does not depend in any way on a
+// CONSTANT_Parameter, we mark it as invariant, assigned to no
+// segment.  (Or, if you wish, to the global invariant
+// segment, which we do not bother to reify.)  An invariant
+// constant will be resolved at runtime at most once.
+//
+// We raise an error if:
+//   1. there are any circular dependencies
+//   1a. some parent-linked ancestor of P is P itself
+//   1b. the bss of some P depends on P (i.e., a bootstrap loop)
+//   1c. any condy depends directly or indirectly on itself
+//   1d. any other circularity (MH to Linkage, for example)
+//   2. some variant X depends on two unrelated parameters P, Q
+//   3. there is a depth-three parameter P -> Q1 -> Q2
+//
+// If we ever do multi-class classfiles or have some other use
+// for deeper nesting, 3 can be relaxed.  For starters, we
+// just need the following kinds of segments:
+//
+//  - a parent-less segment for a variant class (one per file)
+//  - a child segment for any extra-variant non-static method
+//  - a parent-less segment for any variant static method
+//
+// The compiler is free to reuse segments if it can get away
+// with it.  Several methods can share one segment (child or
+// not), if they can all work off of the same set of variant
+// constants.
+//
+// Why have the parent link at all?  Segments almost never
+// nest, so the parent link is almost always null (0x0000)
+// in a CONSTANT_Parameter.  The problem is that there is
+// a small amount of generic nesting we must support,
+// such as in `class Foo<T> { <V> void bar(); }`.
+// The code of Foo.bar needs access to constants from
+// Foo<T> as well as <V>bar, for any pair of T and U.
+// This could be arranged for by allowing bar to declare
+// a dependency on *both* parameters (for <T> and also <V>)
+// but it is far simpler for the JVM to manage either zero
+// or one linkage parameter, rather than several.  The
+// next alternative is better:  Allow a CP segment for <T>
+// to be shared directly, as a parent segment, by any
+// number of <V>bar segments (or none at all).  This requires
+// the JVM to set up the parent/child relations among
+// segments that we see here.  (Maybe segments could be
+// made totally independent, but this would require cross
+// linkage between independent Foo<T> and <V>bar segments
+// which seems more complex than allowing parent links.)
+// Could we infer parent relations between segments, and
+// remove the explicit parent link in C_Parameter?
+// Yes, to some degree; maybe we will do this in the future.
+//
+void ClassFileParser::find_constant_pool_segments(TRAPS) {
+  assert(_constant_to_segment_map != NULL && _segment_to_constant_map != NULL, "init");
+  assert(_class_parametric_constant_index >= 0, "init");
+  assert(_segments == NULL, "TBD");
+
+  // Right now, the _constant_to_segment_map contains only segment numbers
+  // for CONSTANT_Parameter entries.  Before assigning segment numbers
+  // to all the other constants, let's normalize a bit.  If the enclosing
+  // class is parametric, we will make sure its segment is SEG_MIN (#1).
+  // Do this by swapping whoever was assigned #1 with the guy which
+  // was claimed by the class's Parametric attribute.
+  if (_class_parametric_constant_index != 0) {
+    const int seg1 = SEG_MIN;
+    const int param1 = _class_parametric_constant_index;
+    assert(_cp->tag_at(param1).is_variant_parameter(), "");
+    const int seg2 = _constant_to_segment_map[param1];  // wrong seg?
+    assert(_segment_to_constant_map[seg2] == param1, "");
+    if (seg2 != seg1) {  // oops; swap them
+      int param2 = _segment_to_constant_map[seg1];
+      assert(_cp->tag_at(param2).is_variant_parameter(), "");
+      assert(seg1 == _constant_to_segment_map[param2], "");
+      assert(param2 != param1, "");
+      // Set it right:
+      _constant_to_segment_map[param1] = seg1;
+      _constant_to_segment_map[param2] = seg2;
+      _segment_to_constant_map[seg1] = param1;
+      _segment_to_constant_map[seg2] = param2;
+    }
+  }
+
+  // After that little chore we can create and populate the segments.
+  {
+    int si_len = segment_max() + 1;  // segment numbers are 1-based
+    _segments = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, SegmentInfo*, si_len);
+    memset(_segments, 0, sizeof(_segments[0]) * si_len);
+    for (int segnum = SEG_MIN; segnum <= segment_max(); segnum++) {
+      const int param = _segment_to_constant_map[segnum];
+      _segments[segnum] = new SegmentInfo(this, segnum, param);
+    }
+  }
+
+  ConstantPool* const cp = _cp;
+
+  bool failing = false;
+  int circularity_at_node = 0;  // error report
+  int bad_dependency_at_node = 0;  // error report
+  int parameter_too_deep = 0;  // error report
+
+  {
+    // Before we look at the CP graph, check CONSTANT_Parameters for cycles.
+    // This allows us to compute depths, which in turn let us choose
+    // the most-specific segment for constants which depend on two params.
+    GrowableArray<int> stack;
+    for (int segnum = SEG_MIN; segnum <= segment_max(); segnum++) {
+      SegmentInfo* si = segment_info(segnum);
+      int param = si->parameter_index();
+      assert(cp->tag_at(param).is_variant_parameter(), "");
+      assert(segment_for_constant(param) == segnum, "");
+      bool no_cycles = si->check_parents(stack);
+      if (!no_cycles) {
+        failing = true;
+        circularity_at_node = param;
+      } else if (si->depth() > 2) {
+        failing = true;
+        parameter_too_deep = param;
+      }
+      // report any error later, after we get to a known state
+    }
+  }
+
+  int index;
+  const int length = cp->length();
+  // Now walk the CP graph as a whole.
+
+  GrowableArray<int> worklist;
+  // The worklist contains pairs: (V1 -42 V1 D1a V1 D1b...)...
+  // Each V1 depends on D1[a-z].  The D1[a-z] may need to
+  // be pushed as (V2 -41) for recursive processing, which is
+  // immediately expanded to (V2 -42 D2a V2 D2b...).
+  //
+  // Each graph edge V1->D1a means that V1 cannot be resolved
+  // unless D1a is resolved first.  Thus, either D1a is in
+  // the root segment (#0), or V1 and D1a are in the same
+  // segment, or D1a is in a parent segment of V1.
+  //
+  // Each pair V1 D1a is discarded after D1a has been finished,
+  // and its segment assignment factored into that of V1.
+  // When the sentinel pair V1 -42 is reached, we know that all
+  // of V1's dependencies are covered, and V1 is now finished.
+  //
+  // While V1 is on the worklist with a -42, and only then, its
+  // assigned segment is "colored" with 'SEG_WORKING' bits,
+  // so its being-visited state is tracked.  This lets us
+  // detect circularities in the V1->D1a graph; that would
+  // cause infinite loops, and also must be rejected as illegal.
+  //
+  // The whole process is pumped by one linear pass over the CP.
+  //
+  // The initial state of the segment_for_constant table is
+  // as follows:
+  //
+  //   - 0 (SEG_NONE) for constants which can never be variant
+  //   - n>0 for each CONSTANT_Parameter (already assigned)
+  //   - -1 (SEG_TBD) for all potentially varying constants
+  //
+  // This routine will change only the -1 entries, to either
+  // 0 for constants proven invariant, or to some n>0 for
+  // variant constants, where n is the segment number
+  // of the segment (the uniquely least-varying one) which
+  // the constant depends on.
+
+  const int EDGES_TBD  = -41;  //special worklist entry
+  const int EDGES_DONE = -42;  //special worklist entry
+
+  for (index = 1; index < length; index++) {
+    const int index_segnum = segment_for_constant(index, true);
+    if (index_segnum != SEG_TBD) {
+      assert(is_valid_segment_number(index_segnum), "bad value in tracking array");
+      if (cp->tag_at(index).is_variant_parameter()) {
+        assert(segment_info(index_segnum)->parameter_index() == index,
+               "bad parameter segment");
+        // and fall through, to check my bootstrap specifier
+      } else {
+        continue;
+      }
+    }
+    worklist.push(index);
+    worklist.push(EDGES_TBD); // push (node ETBD)
+    while (worklist.is_nonempty()) {
+      const int dep = worklist.pop();
+      const int node = worklist.pop(); // pop (node [EDONE | ETBD | dep])
+      int node_segnum = segment_for_constant(node, true);
+
+      // parameter nodes are specially processed: their segments
+      // are precomputed, but we still examine their dependencies
+      const bool node_is_param = (node_segnum >= SEG_MIN);
+      assert(node_is_param == cp->tag_at(node).is_variant_parameter(),
+             "junk on worklist?");
+
+      if (dep == EDGES_TBD) {  // found (node ETBD)
+        if (node_segnum == SEG_TBD) {
+          // mark the node as being "on stack" using flag bits
+          set_segment_for_constant(node, SEG_WORKING | SEG_NONE);
+        } else {
+          assert(node_is_param, "");
+          assert(worklist.is_empty(), "");
+        }
+        // expand to (node EDONE node da node db...)
+        worklist.push(node);
+        worklist.push(EDGES_DONE);  // push (node EDONE) first
+
+        // Collect dependencies:
+        int dep = 0;
+        bool have_bss_deps = false;
+        switch (cp->tag_at(node).value()) {
+          case JVM_CONSTANT_Linkage: {
+            DEBUG_ONLY(dep = cp->variant_linkage_ref_index_at(index));
+            assert(segment_for_constant(dep, true) == SEG_NONE, "sym ref never variant");
+            dep = cp->variant_linkage_constant_index_at(index);
+            break;
+          }
+          case JVM_CONSTANT_MethodHandle: {
+            dep = cp->method_handle_ref_index_at(index);
+            break;
+          }
+          case JVM_CONSTANT_Dynamic:
+          case JVM_CONSTANT_InvokeDynamic: {
+            have_bss_deps = true;
+          }
+          default: ShouldNotReachHere();
+        }
+        if (dep != 0 && segment_for_constant(dep, true) != SEG_NONE) {
+          worklist.push(node);
+          worklist.push(dep);   //push (node dep)
+        }
+        if (have_bss_deps) {
+          const int bsm = cp->bootstrap_method_ref_index_at(node);
+          if (segment_for_constant(bsm, true) != SEG_NONE) {
+            worklist.push(node);
+            worklist.push(bsm);   //push (node bsm)
+          }
+          const int argc = cp->bootstrap_argument_count_at(node);
+          for (int j = 0; j < argc; j++) {
+            const int arg = cp->bootstrap_argument_index_at(node, j);
+            if (segment_for_constant(arg, true) != SEG_NONE) {
+              worklist.push(node);
+              worklist.push(arg);   //push (node arg)
+            }
+          }
+        }
+        continue;
+      }
+
+      assert(node_is_param || (node_segnum & SEG_WORKING) == SEG_WORKING,
+             "non-param node on stack must be in working state");
+      node_segnum &= ~SEG_WORKING;  // push aside flag bits for now
+      assert(is_valid_segment_number(node_segnum), "oob");
+
+      if (dep == EDGES_DONE) {  // found (node EDONE)
+        // no more edges to process for this node
+        if (!node_is_param) {  // clear working state flag bits
+          set_segment_for_constant(node, node_segnum);
+        }
+        continue;
+      }
+
+      // popped (node dep), where node->dep is a regular dependency
+      if (failing) {
+        // If an error is detected, ignore all subsequent edges.
+        continue;
+      }
+      int dep_segnum = segment_for_constant(dep, true);
+      if (dep_segnum == SEG_TBD) {
+        // we have to do a recursive pass over dep before deciding node
+        worklist.push(dep);
+        worklist.push(EDGES_TBD);
+        continue;
+      }
+      if ((dep_segnum & SEG_WORKING) == SEG_WORKING) {
+        failing = true;
+        circularity_at_node = node;  // Error, ignore node->dep and continue.
+        continue;
+      }
+      assert(is_valid_segment_number(dep_segnum), "oob");
+
+      // OK: node@<node_segnum> depends on dep@<dep_segnum>
+      // And node_segnum might need to be adjusted.
+      if (dep_segnum == SEG_NONE || dep_segnum == node_segnum) {
+        // The dep adds no information, so no adjustment is needed.
+        continue;
+      }
+      if (node_segnum == SEG_NONE) {
+        // The node has no preference, and so dep determines it, for now.
+        assert(!node_is_param, "");
+        set_segment_for_constant(node, SEG_WORKING | dep_segnum);
+        continue;
+      }
+
+      // We can get here if one is a parent and one is a child:
+      //    class Box<Node> { <Dep> void foo(Map<Dep,Node> x, Dep y); }
+      // Here, a constant reifying Map<Dep,Node> will infer to Dep, not Node.
+      // Of the two segments, one must depend on the other,
+      // and we will updated node (if necessary) to depend on
+      // the more dependent one (the child, not the parent).
+      // If they are not related in this way, we must report
+      // an error; the constant pool is malformed, about as
+      // badly as a circularity.
+      SegmentInfo* node_info = segment_info(node);
+      SegmentInfo* dep_info  = segment_info(dep);
+      if (node_info->depends_on(dep_info)) {
+        // The dep is in an ancestor segment of node, so no update.
+        continue;
+      }
+      if (!dep_info->depends_on(node_info)) {
+        // The two segments can never co-exist! This is a compiler error.
+        failing = true;
+        bad_dependency_at_node = node;
+        continue;
+      }
+      if (node_is_param) {
+        // A parameter requires its own segment to bootstrap itself.
+        // This isn't caught by the generic circularity testing logic
+        // simply because we won't run CONSTANT_Parameter through the
+        // same SEG_WORKING logic.  Why not?  No deep reason:  The
+        // _constant_to_segment_map is pre-initialized to link between
+        // segments and parameters, and we don't want to disrupt that
+        // with TBD and WORKING sentinels.  The code would be cleaner
+        // with an input table and an output table, and this is the
+        // complexity cost of an in-place algorithm.
+        failing = true;
+        circularity_at_node = node;
+        continue;
+      }
+
+      // We found some new information in the dependency.
+      // Push it into the table entry for the node, and keep on working.
+      set_segment_for_constant(node, SEG_WORKING | dep_segnum);
+    }
+  }
+
+#ifdef ASSERT
+  // Do some spot-checking; this is not comprehensive.
+  // If any of shows a bug, it's in the previous algorithm.
+  if (!failing) {
+    for (index = 1; index < length; index++) {
+      const int segnum = segment_for_constant(index);
+      switch (cp->tag_at(index).value()) {
+        case JVM_CONSTANT_Parameter: {
+          assert(is_valid_segment_number(segnum, true), "oob");
+          const int param = segment_info(segnum)->parameter_index();
+          assert(index == param, "cross link still valid");
+          break;
+        }
+        case JVM_CONSTANT_Linkage: {
+          assert(is_valid_segment_number(segnum), "oob");
+          const int dep = cp->variant_linkage_constant_index_at(index);
+          // sanity-check this trivial case of pass-through
+          const int segnum2 = segment_for_constant(dep);
+          assert(segnum == segnum2, "trivial dependency");
+          break;
+        }
+        case JVM_CONSTANT_InvokeDynamic:
+        case JVM_CONSTANT_Dynamic: {
+          assert(is_valid_segment_number(segnum), "oob");
+          bool saw_variant = false;
+          const int argc = cp->bootstrap_argument_count_at(index);
+          for (int j = -1; j < argc; j++) {
+            const int dep = (j < 0
+                             ? cp->bootstrap_method_ref_index_at(index)
+                             : cp->bootstrap_argument_index_at(index, j));
+            const int dep_segnum = segment_for_constant(dep);
+            if (dep_segnum != SEG_NONE) {
+              saw_variant = true;
+              assert(segnum != SEG_NONE,
+                     "invariant indy/condy must not depend on variant argument");
+              assert(segment_info(segnum)->depends_on(segment_info(dep_segnum)),
+                     "indy/condy must live in same segment as its arguments");
+            }
+          }
+          if (!saw_variant) {
+            assert(segnum == SEG_NONE, "spurious variation");
+          }
+          break;
+        }
+        default:
+          assert(is_valid_segment_number(segnum), "oob");
+      }
+    }
+  }
+#endif
+
+  // Report errors after all the data structure has settled.
+  // This might keep some bugs away, depending on how the
+  // bad classfile is processed during error reporting.
+
+  guarantee_property(circularity_at_node == 0,
+                     "Illegal cyclic constant pool entry at %d in class %s",
+                     circularity_at_node, CHECK);
+
+  guarantee_property(bad_dependency_at_node == 0,
+                     "Illegal cross-segment constant pool entry at %d in class %s",
+                     bad_dependency_at_node, CHECK);
+
+  guarantee_property(parameter_too_deep == 0,
+                     "Illegal constant pool variance depth at parameter %d in class %s",
+                     parameter_too_deep, CHECK);
+
+  assert(!failing, "");  // failures have been reported by now
+}
+
+void ClassFileParser::check_constant_pool_segments(TRAPS) {
+
+  // Check the class, if it's parametric:
+  int cparam = _class_parametric_constant_index;
+  SegmentInfo* cseg = NULL;
+  if (cparam != 0) {
+    cseg = segment_info(segment_for_constant(cparam));
+    guarantee_property(!cseg->has_parent(),
+                     "Illegal Parametric attribute %d in class %s",
+                     cparam, CHECK);
+  }
+
+  // Check and list the parametric fields:
+  for (int field_number = 0; field_number < _java_fields_count; field_number++) {
+    int fpi = _field_parameter_indexes[field_number];
+    if (fpi != 0) {
+      SegmentInfo* fseg = segment_info(segment_for_constant(fpi));
+      fseg->_parametric_fields.push(field_number);
+      guarantee_property(fpi == _class_parametric_constant_index,
+                         "Illegal Parametric attribute %d on field in class %s",
+                         fpi, CHECK);
+    }
+  }
+
+  // Check and list the parametric methods:
+  const int length = _methods->length();
+  for (int method_number = 0; method_number < _methods->length(); method_number++) {
+    const ConstMethod* cm = _methods->at(method_number)->constMethod();
+    int mpi = cm->parametric_constant_index();
+    if (mpi != 0) {
+      SegmentInfo* mseg = segment_info(segment_for_constant(mpi));
+      mseg->_parametric_methods.push(method_number);
+      if (mseg->has_parent()) {
+        guarantee_property(mseg->parent() == cseg,
+                           "Illegal Parametric attribute %d on method in class %s",
+                           mpi, CHECK);
+      }
+    }
+  }
+
+  // Ensure all segments are used by somebody.
+  for (int segnum = SEG_MIN; segnum <= segment_max(); segnum++) {
+    SegmentInfo* seg = segment_info(segnum);
+    if (seg == cseg)  continue;
+    if (seg->_parametric_methods.is_nonempty())  continue;
+    // Is this a silly check?  It's not really a normal one for the JVM.
+    // Probably we should just ignore unused segments.
+    guarantee_property(false,
+                       "Unused CONSTANT_Parameter %d on method in class %s",
+                       seg->parameter_index(), CHECK);
+  }
+
+  // Organize the parametric constants:
+  for (int cpi = 1; cpi < _cp->length(); cpi++) {
+    int segnum = segment_for_constant(cpi);
+    if (segnum != 0) {
+      segment_info(segnum)->_parametric_constants.push(cpi);
+    }
+  }
+}
+
 class NameSigHash: public ResourceObj {
  public:
   const Symbol*       _name;       // name
@@ -1361,6 +2060,7 @@ void ClassFileParser::parse_field_attributes(const ClassFileStream* const cfs,
                                              u2* const constantvalue_index_addr,
                                              bool* const is_synthetic_addr,
                                              u2* const generic_signature_index_addr,
+                                             u2* const parametric_constant_index_addr,
                                              ClassFileParser::FieldAnnotationCollector* parsed_annotations,
                                              TRAPS) {
   assert(cfs != NULL, "invariant");
@@ -1372,6 +2072,7 @@ void ClassFileParser::parse_field_attributes(const ClassFileStream* const cfs,
 
   u2 constantvalue_index = 0;
   u2 generic_signature_index = 0;
+  u2 parametric_constant_index = 0;
   bool is_synthetic = false;
   const u1* runtime_visible_annotations = NULL;
   int runtime_visible_annotations_length = 0;
@@ -1422,6 +2123,10 @@ void ClassFileParser::parse_field_attributes(const ClassFileStream* const cfs,
           "Invalid Deprecated field attribute length %u in class file %s",
           attribute_length, CHECK);
       }
+    } else if (_major_version >= Verifier::SPECIES_LINKAGE_MAJOR_VERSION
+               && attribute_name == vmSymbols::tag_parametric()) {
+      parse_parametric_attribute(cfs, "Field", attribute_length,
+                                 &parametric_constant_index, CHECK);
     } else if (_major_version >= JAVA_1_5_VERSION) {
       if (attribute_name == vmSymbols::tag_signature()) {
         if (generic_signature_index != 0) {
@@ -1496,6 +2201,7 @@ void ClassFileParser::parse_field_attributes(const ClassFileStream* const cfs,
   *constantvalue_index_addr = constantvalue_index;
   *is_synthetic_addr = is_synthetic;
   *generic_signature_index_addr = generic_signature_index;
+  *parametric_constant_index_addr = parametric_constant_index;
   AnnotationArray* a = assemble_annotations(runtime_visible_annotations,
                                             runtime_visible_annotations_length,
                                             runtime_invisible_annotations,
@@ -1640,6 +2346,12 @@ void ClassFileParser::parse_fields(const ClassFileStream* const cfs,
   // one for the field the JVM injects when detecting an empty inline class
   const int total_fields = length + num_injected + (is_inline_type ? 2 : 0);
 
+  if (has_segments()) {
+    // a place to stash Parametric attribute values, while we consider them
+    _field_parameter_indexes = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, int, total_fields);
+    memset(_field_parameter_indexes, 0, sizeof(_field_parameter_indexes[0]) * total_fields);
+  }
+
   // The field array starts with tuples of shorts
   // [access, name index, sig index, initial value index, byte offset].
   // A generic signature slot only exists for field with generic
@@ -1698,6 +2410,7 @@ void ClassFileParser::parse_fields(const ClassFileStream* const cfs,
     u2 constantvalue_index = 0;
     bool is_synthetic = false;
     u2 generic_signature_index = 0;
+    u2 parametric_constant_index = 0;
     const bool is_static = access_flags.is_static();
     FieldAnnotationCollector parsed_annotations(_loader_data);
 
@@ -1710,6 +2423,7 @@ void ClassFileParser::parse_fields(const ClassFileStream* const cfs,
                              &constantvalue_index,
                              &is_synthetic,
                              &generic_signature_index,
+                             &parametric_constant_index,
                              &parsed_annotations,
                              CHECK);
 
@@ -1742,6 +2456,10 @@ void ClassFileParser::parse_fields(const ClassFileStream* const cfs,
         fa[generic_signature_slot] = generic_signature_index;
         generic_signature_slot ++;
         num_generic_signature ++;
+      }
+      if (parametric_constant_index != 0) {
+        access_flags.set_field_is_parametric();
+        _field_parameter_indexes[n] = parametric_constant_index;
       }
     }
 
@@ -2558,6 +3276,7 @@ Method* ClassFileParser::parse_method(const ClassFileStream* const cfs,
   const u1* stackmap_data = NULL;
   int stackmap_data_length = 0;
   u2 generic_signature_index = 0;
+  u2 parametric_constant_index = 0;
   MethodAnnotationCollector parsed_annotations;
   const u1* runtime_visible_annotations = NULL;
   int runtime_visible_annotations_length = 0;
@@ -2793,6 +3512,10 @@ Method* ClassFileParser::parse_method(const ClassFileStream* const cfs,
           "Invalid Deprecated method attribute length %u in class file %s",
           method_attribute_length, CHECK_NULL);
       }
+    } else if (_major_version >= Verifier::SPECIES_LINKAGE_MAJOR_VERSION
+               && method_attribute_name == vmSymbols::tag_parametric()) {
+      parse_parametric_attribute(cfs, "Method", method_attribute_length,
+                                 &parametric_constant_index, CHECK_NULL);
     } else if (_major_version >= JAVA_1_5_VERSION) {
       if (method_attribute_name == vmSymbols::tag_signature()) {
         if (generic_signature_index != 0) {
@@ -2928,6 +3651,7 @@ Method* ClassFileParser::parse_method(const ClassFileStream* const cfs,
       checked_exceptions_length,
       method_parameters_length,
       generic_signature_index,
+      parametric_constant_index,
       runtime_visible_annotations_length +
            runtime_invisible_annotations_length,
       runtime_visible_parameter_annotations_length +
@@ -3181,6 +3905,31 @@ u2 ClassFileParser::parse_generic_signature_attribute(const ClassFileStream* con
     "Invalid Signature attribute at constant pool index %u in class file %s",
     generic_signature_index, CHECK_0);
   return generic_signature_index;
+}
+
+// Parse Parametric attribute for classes, methods, and fields
+void ClassFileParser::parse_parametric_attribute(const ClassFileStream* const cfs,
+                                                 const char* where,
+                                                 u4 attribute_length,
+                                                 u2 *parametric_attribute_addr,
+                                                 TRAPS) {
+  // Do the routine error checks here rather than three other places:
+  if (*parametric_attribute_addr != 0) {
+    classfile_parse_error("%s has multiple Parametric attributes in class file %s", where, CHECK);
+  }
+  if (attribute_length != 2) {
+    classfile_parse_error(
+      "Invalid Parametric attribute length %u in class file %s", attribute_length, CHECK);
+  }
+
+  assert(cfs != NULL, "invariant");
+  cfs->guarantee_more(2, CHECK);  // parametric_constant_index
+  const u2 parametric_constant_index = cfs->get_u2_fast();
+  check_property(
+    valid_symbol_at(parametric_constant_index) && _cp->tag_at(parametric_constant_index).is_variant_parameter(),
+    "Invalid Parametric attribute at constant pool index %u in class file %s",
+    parametric_constant_index, CHECK);
+  *parametric_attribute_addr = parametric_constant_index;
 }
 
 void ClassFileParser::parse_classfile_sourcefile_attribute(const ClassFileStream* const cfs,
@@ -3723,6 +4472,7 @@ void ClassFileParser::parse_classfile_attributes(const ClassFileStream* const cf
   u4  record_attribute_length = 0;
   const u1* permitted_subclasses_attribute_start = NULL;
   u4  permitted_subclasses_attribute_length = 0;
+  u2  parametric_constant_index = 0;
 
   // Iterate over attributes
   while (attributes_count--) {
@@ -3779,6 +4529,10 @@ void ClassFileParser::parse_classfile_attributes(const ClassFileStream* const cf
           "Invalid Deprecated classfile attribute length %u in class file %s",
           attribute_length, CHECK);
       }
+    } else if (_major_version >= Verifier::SPECIES_LINKAGE_MAJOR_VERSION
+               && tag == vmSymbols::tag_parametric()) {
+      parse_parametric_attribute(cfs, "Class", attribute_length,
+                                 &parametric_constant_index, CHECK);
     } else if (_major_version >= JAVA_1_5_VERSION) {
       if (tag == vmSymbols::tag_signature()) {
         if (_generic_signature_index != 0) {
@@ -4039,6 +4793,8 @@ void ClassFileParser::parse_classfile_attributes(const ClassFileStream* const cf
     }
   }
 
+  set_class_parametric_constant_index(parametric_constant_index);
+
   if (_max_bootstrap_specifier_index >= 0) {
     guarantee_property(parsed_bootstrap_methods_attribute,
                        "Missing BootstrapMethods attribute in class file %s", CHECK);
@@ -4055,6 +4811,10 @@ void ClassFileParser::apply_parsed_class_attributes(InstanceKlass* k) {
   }
   if (_generic_signature_index != 0) {
     k->set_generic_signature_index(_generic_signature_index);
+  }
+  if (_class_parametric_constant_index != 0) {
+    assert(_class_parametric_constant_index > 0, "init");
+    k->set_parametric_constant_index(_class_parametric_constant_index);
   }
   if (_sde_buffer != NULL) {
     k->set_source_debug_extension(_sde_buffer, _sde_length);
@@ -6673,6 +7433,12 @@ ClassFileParser::ClassFileParser(ClassFileStream* stream,
   _has_finalizer(false),
   _has_empty_finalizer(false),
   _has_vanilla_constructor(false),
+  _segment_count(-1),
+  _segment_to_constant_map(NULL),
+  _constant_to_segment_map(NULL),
+  _field_parameter_indexes(NULL),
+  _class_parametric_constant_index(-1),
+  _segments(NULL),
   _max_bootstrap_specifier_index(-1) {
 
   _class_name = name != NULL ? name : vmSymbols::unknown_class_name();
@@ -6726,8 +7492,9 @@ ClassFileParser::ClassFileParser(ClassFileStream* stream,
   _relax_verify = relax_format_check_for(_loader_data);
 
   parse_stream(stream, CHECK);
+  assert(stream->at_eos(), "invariant");
 
-  post_process_parsed_stream(stream, _cp, CHECK);
+  post_parse_processing(CHECK);
 }
 
 void ClassFileParser::clear_class_metadata() {
@@ -7136,13 +7903,15 @@ void ClassFileParser::mangle_hidden_class_name(InstanceKlass* const ik) {
          "Bad name_index");
 }
 
-void ClassFileParser::post_process_parsed_stream(const ClassFileStream* const stream,
-                                                 ConstantPool* cp,
-                                                 TRAPS) {
-  assert(stream != NULL, "invariant");
-  assert(stream->at_eos(), "invariant");
+void ClassFileParser::post_parse_processing(TRAPS) {
+  ConstantPool* cp = _cp;
   assert(cp != NULL, "invariant");
   assert(_loader_data != NULL, "invariant");
+
+  if (has_segments()) {
+    // fully initialize _constant_to_segment_map
+    find_constant_pool_segments(CHECK);
+  }
 
   if (_class_name == vmSymbols::java_lang_Object()) {
     check_property(_temp_local_interfaces->length() == 0,
@@ -7310,6 +8079,11 @@ void ClassFileParser::post_process_parsed_stream(const ClassFileStream* const st
 
   // Compute reference type
   _rt = (NULL ==_super_klass) ? REF_NONE : _super_klass->reference_type();
+
+  // use the now-stable method index to populate segment tables
+  if (has_segments()) {
+    check_constant_pool_segments(CHECK);
+  }
 }
 
 void ClassFileParser::set_klass(InstanceKlass* klass) {
