@@ -139,8 +139,10 @@ class constantTag {
   constantTag(jbyte tag) {
     jbyte entry_tag = tag & ~JVM_CONSTANT_QDescBit;
     assert((((tag & JVM_CONSTANT_QDescBit) == 0) && (entry_tag >= 0 && entry_tag <= JVM_CONSTANT_NameAndType) ||
-           (entry_tag >= JVM_CONSTANT_MethodHandle && entry_tag <= JVM_CONSTANT_InvokeDynamic) ||
-           (entry_tag >= JVM_CONSTANT_InternalMin && entry_tag <= JVM_CONSTANT_InternalMax))
+            (entry_tag >= JVM_CONSTANT_MethodHandle && entry_tag <= JVM_CONSTANT_InvokeDynamic) ||
+            (entry_tag >= JVM_CONSTANT_InternalMin && entry_tag <= JVM_CONSTANT_InternalMax) ||
+            (entry_tag == JVM_CONSTANT_Parameter) ||
+            (entry_tag == JVM_CONSTANT_Linkage))
            || (((tag & JVM_CONSTANT_QDescBit) != 0) && (entry_tag == JVM_CONSTANT_Class ||
                entry_tag == JVM_CONSTANT_UnresolvedClass || entry_tag == JVM_CONSTANT_UnresolvedClassInError
                || entry_tag == JVM_CONSTANT_ClassIndex))
