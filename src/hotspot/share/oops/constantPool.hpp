@@ -364,7 +364,7 @@ class ConstantPool : public Metadata {
 
   void variant_linkage_index_at_put(int which, int constant_index, int ref_index) {
     tag_at_put(which, JVM_CONSTANT_Linkage);
-    *int_at_addr(which) = ((jint) constant_index<<16) | ref_index;
+    *int_at_addr(which) = ((jint) ref_index<<16) | constant_index;
   }
 
   void unresolved_string_at_put(int which, Symbol* s) {
