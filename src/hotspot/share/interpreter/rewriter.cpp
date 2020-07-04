@@ -41,6 +41,7 @@
 void Rewriter::compute_index_maps() {
   const int length  = _pool->length();
   init_maps(length);
+  add_cp_cache_entry(0); //@@@@@@ see if it works
   bool saw_mh_symbol = false;
   for (int i = 0; i < length; i++) {
     int tag = _pool->tag_at(i).value();

@@ -60,7 +60,15 @@ class TestClassFileParser {
       #1  /* ref_index */;       // can_have_variant_linkage(): is_method() || is_interface_method()
     }; // #15
 
+    Utf8 "BootstrapMethods"; // #16
+    MethodHandle 7b #18; // #17
 
+    Method #19 #20; // #18
+    class #21; // #19
+    NameAndType #22 #23; // #20
+    Utf8 "java/lang/invoke/ParametricBootstraps"; // #21
+    Utf8 "bootstrap"; // #22
+    Utf8 "([Ljava/lang/Object;)Ljava/lang/Object;" // #23
   } // Constant Pool
 
   0x0021; // access
@@ -123,8 +131,16 @@ class TestClassFileParser {
     } // Member
   } // methods
 
-  [] { // Attributes
-    Attr(#13) { // Parametric
+  [2] { // Attributes
+    Attr(#16) {  // BootstrapMethods
+      [1] {
+        #17 // Method handle
+        [0] { // Arguments
+        }
+      }
+    }
+
+    Attr(#13, 2) { // Parametric
       #14; // #parametric_constant_index, is_variant_parameter()
     } // end Parametric
   } // Attributes

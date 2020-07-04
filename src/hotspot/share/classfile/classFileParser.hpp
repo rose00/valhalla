@@ -235,14 +235,14 @@ class ClassFileParser {
   }
   int segment_for_constant(int cp_index, bool allow_tbd = false) const {
     assert(_segment_count > 0 && _constant_to_segment_map != NULL, "init");
-    assert(_segments != NULL, "do not report numbers prematurely");
+    assert(allow_tbd || _segments != NULL, "do not report numbers prematurely");
     assert(cp_index > 0 && cp_index < _cp->length(), "oob");
     int segnum = _constant_to_segment_map[cp_index];
     assert(allow_tbd || is_valid_segment_number(segnum), "_constant_to_segment_map not ready");
     return segnum;
   }
   void set_segment_for_constant(int cp_index, int segnum) {
-    int prev = segment_for_constant(cp_index);  // trigger asserts
+    int prev = segment_for_constant(cp_index, true);  // trigger asserts
     // Note:  segnum might be "colored" as a negative number
     assert(segnum < 0 || is_valid_segment_number(segnum), "oob");
     _constant_to_segment_map[cp_index] = segnum;

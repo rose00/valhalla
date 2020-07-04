@@ -254,6 +254,17 @@ class ClassLoaderData;
 class MetaspaceClosure;
 
 class MetaspaceObj {
+  // This class has no virtual functions (although Metadata does,
+  // below it).  Nevertheless, there are some protocols that all
+  // subtypes of MetaspaceObj are expected to implement, so that
+  // templates which are defined for this class hierarchy can
+  // work uniformly.  They are as follows:
+  //
+  //   void metaspace_pointers_do(MetaspaceClosure* it) { <walk my refs> }
+  //   MetaspaceObj::Type type() const { return <this>Type; }
+  //
+  // Within the sub-hierarchy of Metadata, these are virtuals.
+
   friend class VMStructs;
   // When CDS is enabled, all shared metaspace objects are mapped
   // into a single contiguous memory block, so we can use these
@@ -301,6 +312,8 @@ class MetaspaceObj {
   f(MethodData) \
   f(ConstantPool) \
   f(ConstantPoolCache) \
+  f(ConstantPoolSegment) \
+  f(ConstantPoolSegmentInfo) \
   f(Annotations) \
   f(MethodCounters) \
   f(RecordComponent)

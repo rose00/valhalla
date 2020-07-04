@@ -490,9 +490,7 @@ public:
     _parent_segnum(_cp->variant_parameter_parent_index_at(parameter_index))
   {
     assert(_cp->tag_at(parameter_index).is_variant_parameter(), "");
-    assert(_cfp->segment_for_constant(parameter_index) == 0, "");
-    // seed the map for later traversal
-    cfp->set_segment_for_constant(parameter_index, segnum);
+    assert(_cfp->segment_for_constant(parameter_index) == segnum, "");
     _depth = (has_parent() ? UNKNOWN_DEPTH : MIN_DEPTH);
   }
   ~SegmentInfo();
@@ -790,6 +788,7 @@ void ClassFileParser::parse_constant_pool(const ClassFileStream* const stream,
         // when BootstrapMethods attr is available
 
         assert(next_segnum != 0, "");
+        set_segment_for_constant(index, next_segnum);
         _segment_to_constant_map[next_segnum++] = index;
         break;
       }
@@ -1195,12 +1194,12 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
   // was claimed by the class's Parametric attribute.
   if (_class_parametric_constant_index != 0) {
     const int seg1 = SEG_MIN;
+    const int param2 = _segment_to_constant_map[seg1];
     const int param1 = _class_parametric_constant_index;
     assert(_cp->tag_at(param1).is_variant_parameter(), "");
     const int seg2 = _constant_to_segment_map[param1];  // wrong seg?
     assert(_segment_to_constant_map[seg2] == param1, "");
     if (seg2 != seg1) {  // oops; swap them
-      int param2 = _segment_to_constant_map[seg1];
       assert(_cp->tag_at(param2).is_variant_parameter(), "");
       assert(seg1 == _constant_to_segment_map[param2], "");
       assert(param2 != param1, "");
@@ -1222,6 +1221,10 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
       _segments[segnum] = new SegmentInfo(this, segnum, param);
     }
   }
+
+  assert(_class_parametric_constant_index == 0 ||
+         segment_info(SEG_MIN)->parameter_index() == _class_parametric_constant_index,
+         "");
 
   ConstantPool* const cp = _cp;
 
@@ -1252,7 +1255,6 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
     }
   }
 
-  int index;
   const int length = cp->length();
   // Now walk the CP graph as a whole.
 
@@ -1296,19 +1298,19 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
   const int EDGES_TBD  = -41;  //special worklist entry
   const int EDGES_DONE = -42;  //special worklist entry
 
-  for (index = 1; index < length; index++) {
-    const int index_segnum = segment_for_constant(index, true);
-    if (index_segnum != SEG_TBD) {
-      assert(is_valid_segment_number(index_segnum), "bad value in tracking array");
-      if (cp->tag_at(index).is_variant_parameter()) {
-        assert(segment_info(index_segnum)->parameter_index() == index,
+  for (int scan = 1; scan < length; scan++) {
+    const int scan_segnum = segment_for_constant(scan, true);
+    if (scan_segnum != SEG_TBD) {
+      assert(is_valid_segment_number(scan_segnum), "bad value in tracking array");
+      if (cp->tag_at(scan).is_variant_parameter()) {
+        assert(segment_info(scan_segnum)->parameter_index() == scan,
                "bad parameter segment");
         // and fall through, to check my bootstrap specifier
       } else {
         continue;
       }
     }
-    worklist.push(index);
+    worklist.push(scan);
     worklist.push(EDGES_TBD); // push (node ETBD)
     while (worklist.is_nonempty()) {
       const int dep = worklist.pop();
@@ -1337,14 +1339,19 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
         int dep = 0;
         bool have_bss_deps = false;
         switch (cp->tag_at(node).value()) {
+          case JVM_CONSTANT_Parameter: {
+            dep = cp->variant_parameter_parent_index_at(node);
+            have_bss_deps = true;
+            break;
+          }
           case JVM_CONSTANT_Linkage: {
-            DEBUG_ONLY(dep = cp->variant_linkage_ref_index_at(index));
+            DEBUG_ONLY(dep = cp->variant_linkage_ref_index_at(node));
             assert(segment_for_constant(dep, true) == SEG_NONE, "sym ref never variant");
-            dep = cp->variant_linkage_constant_index_at(index);
+            dep = cp->variant_linkage_constant_index_at(node);
             break;
           }
           case JVM_CONSTANT_MethodHandle: {
-            dep = cp->method_handle_ref_index_at(index);
+            dep = cp->method_handle_ref_index_at(node);
             break;
           }
           case JVM_CONSTANT_Dynamic:
@@ -1466,7 +1473,7 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
   // Do some spot-checking; this is not comprehensive.
   // If any of shows a bug, it's in the previous algorithm.
   if (!failing) {
-    for (index = 1; index < length; index++) {
+    for (int index = 1; index < length; index++) {
       const int segnum = segment_for_constant(index);
       switch (cp->tag_at(index).value()) {
         case JVM_CONSTANT_Parameter: {
@@ -3926,7 +3933,8 @@ void ClassFileParser::parse_parametric_attribute(const ClassFileStream* const cf
   cfs->guarantee_more(2, CHECK);  // parametric_constant_index
   const u2 parametric_constant_index = cfs->get_u2_fast();
   check_property(
-    valid_symbol_at(parametric_constant_index) && _cp->tag_at(parametric_constant_index).is_variant_parameter(),
+    _cp->is_within_bounds(parametric_constant_index) &&
+    _cp->tag_at(parametric_constant_index).is_variant_parameter(),
     "Invalid Parametric attribute at constant pool index %u in class file %s",
     parametric_constant_index, CHECK);
   *parametric_attribute_addr = parametric_constant_index;

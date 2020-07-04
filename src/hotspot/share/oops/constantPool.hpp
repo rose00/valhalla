@@ -47,6 +47,8 @@
 // the entry in the constant pool is a klass object and not a Symbol*.
 
 class SymbolHashMap;
+class CPSegmentInfo;
+class ConstantPoolSegment;
 
 class CPSlot {
  friend class ConstantPool;
@@ -98,6 +100,7 @@ class ConstantPool : public Metadata {
   friend class JVMCIVMStructs;
   friend class BytecodeInterpreter;  // Directly extracts a klass in the pool for fast instanceof/checkcast
   friend class Universe;             // For null constructor
+  friend class CPSegmentInfo;        //@@ for what?
  private:
   // If you add a new field that points to any metaspace object, you
   // must add this field to ConstantPool::metaspace_pointers_do().
@@ -109,6 +112,8 @@ class ConstantPool : public Metadata {
   // Consider using an array of compressed klass pointers to
   // save space on 64-bit platforms.
   Array<Klass*>*       _resolved_klasses;
+
+  Array<CPSegmentInfo*>* _segment_array;  //@@ consider stuffing this into _cache for a space reduction
 
   u2              _major_version;        // major version number of class file
   u2              _minor_version;        // minor version number of class file
@@ -148,6 +153,8 @@ class ConstantPool : public Metadata {
   u1* tag_addr_at(int which) const             { return tags()->adr_at(which); }
 
   void set_operands(Array<u2>* operands)       { _operands = operands; }
+
+  void set_segment_array(Array<CPSegmentInfo*>* ss) { _segment_array = ss; }
 
   u2 flags() const                             { return _flags; }
   void set_flags(u2 f)                         { _flags = f; }
@@ -300,6 +307,13 @@ class ConstantPool : public Metadata {
   int invokedynamic_bootstrap_ref_index_at(int indy_index) const {
     return invokedynamic_cp_cache_entry_at(indy_index)->constant_pool_index();
   }
+
+  // Support for variant segments.
+  bool has_segments() const                 { return _segment_array != NULL; }
+  int segment_count() const                 { return has_segments() ? _segment_array->length() : 0; }
+  static const int SEGMENT_MIN = 1;
+  CPSegmentInfo* segment_at(int n) const    { return _segment_array->at(n - SEGMENT_MIN); }
+  Array<CPSegmentInfo*>* segment_array() const { return _segment_array; }
 
   // Assembly code support
   static int tags_offset_in_bytes()         { return offset_of(ConstantPool, _tags); }

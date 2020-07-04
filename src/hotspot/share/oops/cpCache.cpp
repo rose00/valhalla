@@ -50,7 +50,7 @@
 // Implementation of ConstantPoolCacheEntry
 
 void ConstantPoolCacheEntry::initialize_entry(int index) {
-  assert(0 < index && index < 0x10000, "sanity check");
+  assert(0 <= index && index < 0x10000, "sanity check");
   _indices = index;
   _f1 = NULL;
   _f2 = _flags = 0;

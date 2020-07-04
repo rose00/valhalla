@@ -45,6 +45,7 @@
 #include "oops/array.hpp"
 #include "oops/constantPool.inline.hpp"
 #include "oops/cpCache.inline.hpp"
+#include "oops/cpSegment.hpp"
 #include "oops/instanceKlass.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/objArrayOop.inline.hpp"
@@ -101,12 +102,15 @@ ConstantPool::ConstantPool(Array<u1>* tags) :
   _tags(tags),
   _length(tags->length()) {
 
-    assert(_tags != NULL, "invariant");
-    assert(tags->length() == _length, "invariant");
-    assert(tag_array_is_zero_initialized(tags), "invariant");
-    assert(0 == flags(), "invariant");
-    assert(0 == version(), "invariant");
-    assert(NULL == _pool_holder, "invariant");
+  assert(_tags != NULL, "invariant");
+  assert(tags->length() == _length, "invariant");
+  assert(tag_array_is_zero_initialized(tags), "invariant");
+  assert(0 == flags(), "invariant");
+  assert(0 == version(), "invariant");
+  assert(NULL == _pool_holder, "invariant");
+  assert(NULL == _operands, "invariant");
+  assert(NULL == _resolved_klasses, "invariant");
+  assert(NULL == _segment_array, "invariant");
 }
 
 void ConstantPool::deallocate_contents(ClassLoaderData* loader_data) {
@@ -120,6 +124,9 @@ void ConstantPool::deallocate_contents(ClassLoaderData* loader_data) {
 
   MetadataFactory::free_array<jushort>(loader_data, operands());
   set_operands(NULL);
+
+  MetadataFactory::free_array<CPSegmentInfo*>(loader_data, segment_array());
+  set_segment_array(NULL);
 
   release_C_heap_structures();
 
@@ -140,6 +147,7 @@ void ConstantPool::metaspace_pointers_do(MetaspaceClosure* it) {
   it->push(&_cache);
   it->push(&_pool_holder);
   it->push(&_operands);
+  it->push(&_segment_array);
   it->push(&_resolved_klasses, MetaspaceClosure::_writable);
 
   for (int i = 0; i < length(); i++) {
@@ -2443,6 +2451,7 @@ void ConstantPool::print_value_on(outputStream* st) const {
   st->print("constant pool [%d]", length());
   if (has_preresolution()) st->print("/preresolution");
   if (operands() != NULL)  st->print("/operands[%d]", operands()->length());
+  if (has_segments())      st->print("/segments[%d]", segment_count());
   print_address_on(st);
   if (pool_holder() != NULL) {
     st->print(" for ");
