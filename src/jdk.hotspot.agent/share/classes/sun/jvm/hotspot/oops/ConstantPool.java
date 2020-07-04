@@ -87,7 +87,9 @@ public class ConstantPool extends Metadata implements ClassConstants {
   private static synchronized void initialize(TypeDataBase db) throws WrongTypeException {
     Type type   = db.lookupType("ConstantPool");
     tags        = type.getAddressField("_tags");
-    operands    = type.getAddressField("_operands");
+    extra       = type.getAddressField("_extra");
+    Type type2  = db.lookupType("ConstantPool::Extra");
+    operands    = type2.getAddressField("_operands");
     cache       = type.getAddressField("_cache");
     poolHolder  = new MetadataField(type.getAddressField("_pool_holder"), 0);
     length      = new CIntField(type.getCIntegerField("_length"), 0);
@@ -111,7 +113,8 @@ public class ConstantPool extends Metadata implements ClassConstants {
   public boolean isConstantPool()      { return true; }
 
   private static AddressField tags;
-  private static AddressField operands;
+  private static AddressField extra;
+  private static AddressField operands;  // inside extra if present
   private static AddressField cache;
   private static AddressField resolved_klasses;
   private static MetadataField poolHolder;
@@ -129,7 +132,11 @@ public class ConstantPool extends Metadata implements ClassConstants {
   private static int INDY_ARGV_OFFSET;
 
   public U1Array           getTags()       { return new U1Array(tags.getValue(getAddress())); }
-  public U2Array           getOperands()   { return new U2Array(operands.getValue(getAddress())); }
+  public Address           getExtra()      { return extra.getValue(getAddress()); }
+  public U2Array           getOperands()   {
+      return (getExtra() == null ? null :
+              new U2Array(operands.getValue(getExtra().getAddress())));
+  }
   public ConstantPoolCache getCache()      {
     Address addr = cache.getValue(getAddress());
     return (ConstantPoolCache) VMObjectFactory.newObject(ConstantPoolCache.class, addr);

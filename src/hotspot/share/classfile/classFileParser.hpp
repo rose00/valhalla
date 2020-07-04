@@ -247,8 +247,8 @@ class ClassFileParser {
     assert(segnum < 0 || is_valid_segment_number(segnum), "oob");
     _constant_to_segment_map[cp_index] = segnum;
   }
-  static const int SEG_NONE    = 0;    // default entry in _constant_to_segment_map
-  static const int SEG_MIN     = 1;    // first segment index (they are one-based!)
+  static const int SEG_MIN     = ConstantPool::SEG_MIN;
+  static const int SEG_NONE    = ConstantPool::SEG_NONE; // in _constant_to_segment_map
   static const int SEG_TBD     = -1;   // sentinel *value* to initiate computation
   static const int SEG_WORKING = -5 << 24;  // sentinel *bits* for circularity check
   bool is_valid_segment_number(int segnum, bool reject_zero = false) const {

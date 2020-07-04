@@ -208,7 +208,9 @@ typedef HashtableEntry<InstanceKlass*, mtClass>  KlassHashtableEntry;
   nonstatic_field(ConstantPool,                _tags,                                         Array<u1>*)                            \
   nonstatic_field(ConstantPool,                _cache,                                        ConstantPoolCache*)                    \
   nonstatic_field(ConstantPool,                _pool_holder,                                  InstanceKlass*)                        \
-  nonstatic_field(ConstantPool,                _operands,                                     Array<u2>*)                            \
+  nonstatic_field(ConstantPool,                _extra,                                        ConstantPool::ExtraFields*)            \
+  nonstatic_field(ConstantPool::ExtraFields,   _operands,                                     Array<u2>*)                            \
+  nonstatic_field(ConstantPool::ExtraFields,   _segment_count,                                int)                                   \
   nonstatic_field(ConstantPool,                _resolved_klasses,                             Array<Klass*>*)                        \
   nonstatic_field(ConstantPool,                _length,                                       int)                                   \
   nonstatic_field(ConstantPool,                _minor_version,                                u2)                                    \
@@ -1275,6 +1277,7 @@ typedef HashtableEntry<InstanceKlass*, mtClass>  KlassHashtableEntry;
         declare_type(InstanceMirrorKlass, InstanceKlass)                  \
         declare_type(InstanceRefKlass, InstanceKlass)                     \
     declare_type(ConstantPool, Metadata)                                  \
+    declare_type(ConstantPool::ExtraFields, MetaspaceObj)                 \
     declare_type(ConstantPoolCache, MetaspaceObj)                         \
     declare_type(MethodData, Metadata)                                    \
     declare_type(Method, Metadata)                                        \
@@ -2205,7 +2208,7 @@ typedef HashtableEntry<InstanceKlass*, mtClass>  KlassHashtableEntry;
   declare_constant(ConstMethod::_has_default_annotations)                 \
   declare_constant(ConstMethod::_has_type_annotations)                    \
   declare_constant(ConstMethod::_generic_signature_index_word)            \
-  declare_constant(ConstMethod::_generic_signature_constant_word)         \
+  declare_constant(ConstMethod::_parametric_initial_parameter_index_word) \
   declare_constant(ConstMethod::_generic_signature_word_count)            \
                                                                           \
   /**************/                                                        \

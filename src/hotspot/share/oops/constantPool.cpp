@@ -108,9 +108,8 @@ ConstantPool::ConstantPool(Array<u1>* tags) :
   assert(0 == flags(), "invariant");
   assert(0 == version(), "invariant");
   assert(NULL == _pool_holder, "invariant");
-  assert(NULL == _operands, "invariant");
+  assert(NULL == _extra, "invariant");
   assert(NULL == _resolved_klasses, "invariant");
-  assert(NULL == _segment_array, "invariant");
 }
 
 void ConstantPool::deallocate_contents(ClassLoaderData* loader_data) {
@@ -122,11 +121,27 @@ void ConstantPool::deallocate_contents(ClassLoaderData* loader_data) {
   MetadataFactory::free_array<Klass*>(loader_data, resolved_klasses());
   set_resolved_klasses(NULL);
 
-  MetadataFactory::free_array<jushort>(loader_data, operands());
-  set_operands(NULL);
+  if (has_extra()) {
+    ExtraFields* ef = extra();
 
-  MetadataFactory::free_array<CPSegmentInfo*>(loader_data, segment_array());
-  set_segment_array(NULL);
+    MetadataFactory::free_array<jushort>(loader_data, ef->_operands);
+    ef->_operands = NULL;
+
+    int segcount = segment_count();
+
+    int segnum;
+    for (segnum = SEG_MIN; segnum < segcount; segnum++) {
+      //@@ free whole list at ef->_segment_lists->at(segnum);
+    }
+    MetadataFactory::free_array<ConstantPoolSegment*>(loader_data, ef->_segment_lists);
+    ef->_segment_lists = NULL;
+
+    for (segnum = SEG_MIN; segnum < segcount; segnum++) {
+      //@@ free ef->_segment_info_array->at(segnum);
+    }
+    MetadataFactory::free_array<CPSegmentInfo*>(loader_data, ef->_segment_info_array);
+    ef->_segment_info_array = NULL;
+  }
 
   release_C_heap_structures();
 
@@ -140,14 +155,30 @@ void ConstantPool::release_C_heap_structures() {
   unreference_symbols();
 }
 
+void ConstantPool::ensure_extra(ClassLoaderData* loader_data, TRAPS) {
+  if (!has_extra()) {
+    ExtraFields* ef = new(loader_data, ExtraFields::size(), ExtraFields::type(), THREAD) ExtraFields();
+    if (!HAS_PENDING_EXCEPTION) {
+      assert(ef->_operands == NULL, "invariant");
+      assert(ef->_segment_count == 0, "invariant");
+      this->_extra = ef;
+    }
+  }
+}
+
+inline void ConstantPool::ExtraFields::metaspace_pointers_do(MetaspaceClosure* it) {
+  it->push(&_operands);
+  it->push(&_segment_info_array);
+  it->push(&_segment_lists, MetaspaceClosure::_writable);
+}
+
 void ConstantPool::metaspace_pointers_do(MetaspaceClosure* it) {
   log_trace(cds)("Iter(ConstantPool): %p", this);
 
   it->push(&_tags, MetaspaceClosure::_writable);
   it->push(&_cache);
   it->push(&_pool_holder);
-  it->push(&_operands);
-  it->push(&_segment_array);
+  it->push(&_extra);
   it->push(&_resolved_klasses, MetaspaceClosure::_writable);
 
   for (int i = 0; i < length(); i++) {
@@ -1495,7 +1526,7 @@ void ConstantPool::resize_operands(int delta_len, int delta_size, TRAPS) {
   if ( operands() != NULL) { // the safety check
     MetadataFactory::free_array<u2>(loader_data, operands());
   }
-  set_operands(new_ops);
+  set_operands(new_ops, loader_data, CHECK);
 } // end resize_operands()
 
 
@@ -1515,7 +1546,7 @@ void ConstantPool::extend_operands(const constantPoolHandle& ext_cp, TRAPS) {
     Array<u2>* new_ops = MetadataFactory::new_array<u2>(loader_data, delta_size, CHECK);
     // The first element index defines the offset of second part
     operand_offset_at_put(new_ops, 0, 2*delta_len); // offset in new array
-    set_operands(new_ops);
+    set_operands(new_ops, loader_data, CHECK);
   } else {
     resize_operands(delta_len, delta_size, CHECK);
   }
@@ -1556,7 +1587,7 @@ void ConstantPool::copy_operands(const constantPoolHandle& from_cp,
       Array<u2>* new_ops = MetadataFactory::new_array<u2>(loader_data, len, CHECK);
       Copy::conjoint_memory_atomic(
           from_cp->operands()->adr_at(0), new_ops->adr_at(0), len * sizeof(u2));
-      to_cp->set_operands(new_ops);
+      to_cp->set_operands(new_ops, loader_data, CHECK);
     } else {
       int old_len  = to_cp->operands()->length();
       int from_len = from_cp->operands()->length();
@@ -1596,7 +1627,7 @@ void ConstantPool::copy_operands(const constantPoolHandle& from_cp,
       }
 
       // replace target operands array with combined array
-      to_cp->set_operands(new_operands);
+      to_cp->set_operands(new_operands, loader_data, CHECK);
     }
   }
 } // end copy_operands()

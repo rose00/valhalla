@@ -261,7 +261,8 @@ class MetaspaceObj {
   // work uniformly.  They are as follows:
   //
   //   void metaspace_pointers_do(MetaspaceClosure* it) { <walk my refs> }
-  //   MetaspaceObj::Type type() const { return <this>Type; }
+  //   int size() const { return align_up(sizeof(<This>), wordSize) / wordSize; }
+  //   MetaspaceObj::Type type() const { return <This>Type; }
   //
   // Within the sub-hierarchy of Metadata, these are virtuals.
 

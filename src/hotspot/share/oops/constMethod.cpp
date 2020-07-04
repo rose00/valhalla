@@ -178,13 +178,13 @@ u2* ConstMethod::last_u2_element() const {
 u2* ConstMethod::generic_signature_index_addr() const {
   // Located at the end of the constMethod.
   assert(has_generic_signature_or_constant(), "called only if generic signature exists");
-  return last_u2_element() - 1 + _generic_signature_index_word;
+  return last_u2_element() + 1 - _generic_signature_word_count + _generic_signature_index_word;
 }
 
 u2* ConstMethod::parametric_constant_index_addr() const {
   // Located at the end of the constMethod.
   assert(has_generic_signature_or_constant(), "called only if parametric constant exists");
-  return last_u2_element() - 1 + _generic_signature_constant_word;
+  return last_u2_element() + 1 - _generic_signature_word_count + _parametric_initial_parameter_index_word;
 }
 
 u2* ConstMethod::method_parameters_length_addr() const {
@@ -284,7 +284,9 @@ void ConstMethod::set_inlined_tables_length(InlineTableSizes* sizes) {
   if (sizes->generic_signature_index() != 0 ||
       sizes->parametric_constant_index() != 0) {
     *(generic_signature_index_addr()) = sizes->generic_signature_index();
-    *(parametric_constant_index_addr()) = sizes->parametric_constant_index();
+    // set both; latter one might be adjusted after bytecodes are examined
+    (parametric_constant_index_addr())[0] = sizes->parametric_constant_index();
+    (parametric_constant_index_addr())[1] = sizes->parametric_constant_index();
   }
   // New data should probably go here.
   if (sizes->method_parameters_length() >= 0)

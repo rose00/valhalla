@@ -107,13 +107,21 @@ class ConstantPool : public Metadata {
   Array<u1>*           _tags;        // the tag array describing the constant pool's contents
   ConstantPoolCache*   _cache;       // the cache holding interpreter runtime information
   InstanceKlass*       _pool_holder; // the corresponding class
-  Array<u2>*           _operands;    // for variable-sized (InvokeDynamic) nodes, usually empty
+
+  struct ExtraFields : public MetaspaceObj {
+    Array<u2>*         _operands;    // for variable-sized (InvokeDynamic) nodes, usually empty
+    int                _segment_count;
+    Array<CPSegmentInfo*>* _segment_info_array;
+    Array<ConstantPoolSegment*>* _segment_lists;
+    static int size() { return align_up(sizeof(ExtraFields), wordSize) / wordSize; }
+    static MetaspaceObj::Type type() { return ConstantPoolType; }
+    inline void metaspace_pointers_do(MetaspaceClosure* it);
+  };
+  ExtraFields*         _extra;       // present if any sub-fields are non-null
 
   // Consider using an array of compressed klass pointers to
   // save space on 64-bit platforms.
   Array<Klass*>*       _resolved_klasses;
-
-  Array<CPSegmentInfo*>* _segment_array;  //@@ consider stuffing this into _cache for a space reduction
 
   u2              _major_version;        // major version number of class file
   u2              _minor_version;        // minor version number of class file
@@ -152,9 +160,14 @@ class ConstantPool : public Metadata {
 
   u1* tag_addr_at(int which) const             { return tags()->adr_at(which); }
 
-  void set_operands(Array<u2>* operands)       { _operands = operands; }
+  bool has_extra() const                       { return _extra != NULL; }
+  ExtraFields* extra() const                   { assert(has_extra(), ""); return _extra; }
+  void  ensure_extra(ClassLoaderData* loader_data, TRAPS);
 
-  void set_segment_array(Array<CPSegmentInfo*>* ss) { _segment_array = ss; }
+  void set_operands(Array<u2>* operands, ClassLoaderData* cld, TRAPS) {
+    ensure_extra(cld, CHECK);
+    extra()->_operands = operands;
+  }
 
   u2 flags() const                             { return _flags; }
   void set_flags(u2 f)                         { _flags = f; }
@@ -202,7 +215,7 @@ class ConstantPool : public Metadata {
   virtual bool is_constantPool() const      { return true; }
 
   Array<u1>* tags() const                   { return _tags; }
-  Array<u2>* operands() const               { return _operands; }
+  Array<u2>* operands() const               { return has_extra() ? _extra->_operands : NULL; }
 
   bool has_preresolution() const            { return (_flags & _has_preresolution) != 0; }
   void set_has_preresolution() {
@@ -309,11 +322,26 @@ class ConstantPool : public Metadata {
   }
 
   // Support for variant segments.
-  bool has_segments() const                 { return _segment_array != NULL; }
-  int segment_count() const                 { return has_segments() ? _segment_array->length() : 0; }
-  static const int SEGMENT_MIN = 1;
-  CPSegmentInfo* segment_at(int n) const    { return _segment_array->at(n - SEGMENT_MIN); }
-  Array<CPSegmentInfo*>* segment_array() const { return _segment_array; }
+  bool has_segments() const                 { return segment_count() != 0; }
+  int segment_count() const                 { return has_extra() ? _extra->_segment_count : 0; }
+  void set_segment_count(int n, ClassLoaderData* cld, TRAPS) {
+    ensure_extra(cld, CHECK);
+    extra()->_segment_count = n;
+  }
+
+  static const int SEG_MIN = 1;   // smallest valid segment index
+  static const int SEG_NONE = 0;  // non-index for segments, for invariant parts of CP
+  // static list of segment info descriptors (#0 not available)
+  CPSegmentInfo* segment_info_at(int n) const {
+    assert(n >= SEG_MIN && n <= segment_count(), "oob");
+    return extra()->_segment_info_array->at(n);
+  }
+  // dynamic list of active segment splits, one per segment kind
+  // Note: this is stored separately from the static list of segment descriptors
+  ConstantPoolSegment*& segment_list_head_at(int n) const {
+    assert(n >= SEG_MIN && n <= segment_count(), "oob");
+    return *extra()->_segment_lists->adr_at(n);
+  }
 
   // Assembly code support
   static int tags_offset_in_bytes()         { return offset_of(ConstantPool, _tags); }

@@ -502,11 +502,15 @@ public:
   int depth() const { assert(_depth >= MIN_DEPTH, "init"); return _depth; }
   SegmentInfo* parent() const { return _cfp->segment_info(_parent_segnum); }
 
-  bool depends_on(SegmentInfo* ancestor) {
+  bool depends_on_ancestor(SegmentInfo* ancestor) {
     assert(ancestor != NULL, "");
     if (this == ancestor) {
-      return true;   // I always depend on myself
+      return false;   // as an edge case, I do not depend on myself
     }
+    if (parent_segnum() == ancestor->segnum()) {
+      return true;
+    }
+#if 0 // not needed unless nesting depth is greater than 2
     int my_depth       = this->depth();
     int ancestor_depth = ancestor->depth();
     if (ancestor_depth >= my_depth) {
@@ -519,7 +523,11 @@ public:
       test = test->parent();
       test_depth -= 1;
     }
-    return (test == ancestor);
+    if (test == ancestor) {
+      return true;
+    }
+#endif
+    return false;
   }
 
  private:
@@ -1211,6 +1219,12 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
     }
   }
 
+  _cp->set_segment_count(_segment_count, _loader_data, CHECK);
+  _cp->extra()->_segment_info_array =
+    MetadataFactory::new_array<CPSegmentInfo*>(_loader_data, SEG_MIN + _segment_count, CHECK);
+  _cp->extra()->_segment_lists =
+    MetadataFactory::new_array<ConstantPoolSegment*>(_loader_data, SEG_MIN + _segment_count, CHECK);
+
   // After that little chore we can create and populate the segments.
   {
     int si_len = segment_max() + 1;  // segment numbers are 1-based
@@ -1317,8 +1331,9 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
       const int node = worklist.pop(); // pop (node [EDONE | ETBD | dep])
       int node_segnum = segment_for_constant(node, true);
 
-      // parameter nodes are specially processed: their segments
-      // are precomputed, but we still examine their dependencies
+      // Parameter nodes are specially processed: their segments
+      // are precomputed, but we still examine their dependencies,
+      // in order to enforce 1b above.
       const bool node_is_param = (node_segnum >= SEG_MIN);
       assert(node_is_param == cp->tag_at(node).is_variant_parameter(),
              "junk on worklist?");
@@ -1340,6 +1355,7 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
         bool have_bss_deps = false;
         switch (cp->tag_at(node).value()) {
           case JVM_CONSTANT_Parameter: {
+            assert(node_is_param, "");
             dep = cp->variant_parameter_parent_index_at(node);
             have_bss_deps = true;
             break;
@@ -1416,8 +1432,25 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
 
       // OK: node@<node_segnum> depends on dep@<dep_segnum>
       // And node_segnum might need to be adjusted.
-      if (dep_segnum == SEG_NONE || dep_segnum == node_segnum) {
+      if (dep_segnum == SEG_NONE) {
         // The dep adds no information, so no adjustment is needed.
+        continue;
+      }
+      if (dep_segnum == node_segnum) {
+        // This is also a no-op, unless the node is a CONSTANT_Parameter,
+        // im which case it is an error.
+        if (node_is_param) {
+          // Per 1b above, a parameter requires its own segment to
+          // bootstrap itself, which is a dependency cycle.  It can
+          // only depend on an ancestor segment: the global invariant
+          // quasi-segment, and/or its parent (class) segment.  This
+          // isn't caught by the generic circularity testing logic.
+          // In fact, for non-param nodes, it is legal for a dep to be
+          // in the same segment as this node.  Only for param nodes
+          // must the dep be in an ancestor segment.
+          failing = true;
+          circularity_at_node = node;
+        }
         continue;
       }
       if (node_segnum == SEG_NONE) {
@@ -1431,33 +1464,25 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
       //    class Box<Node> { <Dep> void foo(Map<Dep,Node> x, Dep y); }
       // Here, a constant reifying Map<Dep,Node> will infer to Dep, not Node.
       // Of the two segments, one must depend on the other,
-      // and we will updated node (if necessary) to depend on
+      // and we will update node (if necessary) to depend on
       // the more dependent one (the child, not the parent).
       // If they are not related in this way, we must report
       // an error; the constant pool is malformed, about as
       // badly as a circularity.
       SegmentInfo* node_info = segment_info(node);
       SegmentInfo* dep_info  = segment_info(dep);
-      if (node_info->depends_on(dep_info)) {
+      if (node_info->depends_on_ancestor(dep_info)) {
         // The dep is in an ancestor segment of node, so no update.
         continue;
       }
-      if (!dep_info->depends_on(node_info)) {
+      if (!dep_info->depends_on_ancestor(node_info)) {
         // The two segments can never co-exist! This is a compiler error.
         failing = true;
         bad_dependency_at_node = node;
         continue;
       }
       if (node_is_param) {
-        // A parameter requires its own segment to bootstrap itself.
-        // This isn't caught by the generic circularity testing logic
-        // simply because we won't run CONSTANT_Parameter through the
-        // same SEG_WORKING logic.  Why not?  No deep reason:  The
-        // _constant_to_segment_map is pre-initialized to link between
-        // segments and parameters, and we don't want to disrupt that
-        // with TBD and WORKING sentinels.  The code would be cleaner
-        // with an input table and an output table, and this is the
-        // complexity cost of an in-place algorithm.
+        // See "per 1b" comment, above.
         failing = true;
         circularity_at_node = node;
         continue;
@@ -1504,7 +1529,8 @@ void ClassFileParser::find_constant_pool_segments(TRAPS) {
               saw_variant = true;
               assert(segnum != SEG_NONE,
                      "invariant indy/condy must not depend on variant argument");
-              assert(segment_info(segnum)->depends_on(segment_info(dep_segnum)),
+              assert(segnum == dep_segnum ||
+                     segment_info(segnum)->depends_on_ancestor(segment_info(dep_segnum)),
                      "indy/condy must live in same segment as its arguments");
             }
           }
@@ -4374,12 +4400,13 @@ void ClassFileParser::parse_classfile_bootstrap_methods_attribute(const ClassFil
   // The array begins with a series of short[2] pairs, one for each tuple.
   const int index_size = (attribute_array_length * 2);
 
+  cp->ensure_extra(_loader_data, CHECK);
   Array<u2>* const operands =
     MetadataFactory::new_array<u2>(_loader_data, index_size + operand_count, CHECK);
 
   // Eagerly assign operands so they will be deallocated with the constant
   // pool if there is an error.
-  cp->set_operands(operands);
+  cp->set_operands(operands, _loader_data, CHECK);
 
   int operand_fill_index = index_size;
   const int cp_size = cp->length();

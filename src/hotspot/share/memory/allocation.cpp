@@ -80,6 +80,8 @@ void* MetaspaceObj::operator new(size_t size, ClassLoaderData* loader_data,
                                  size_t word_size,
                                  MetaspaceObj::Type type, TRAPS) throw() {
   // Klass has it's own operator new
+  assert(size <= word_size * wordSize, "word_size must contain size");
+  assert(word_size == align_metadata_size(word_size), "user requirement");
   return Metaspace::allocate(loader_data, word_size, type, THREAD);
 }
 

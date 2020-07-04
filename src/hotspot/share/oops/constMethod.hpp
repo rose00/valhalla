@@ -191,10 +191,11 @@ private:
     _has_default_annotations = 0x0400
   };
 
-  enum {       // u2[2] generic_signature_words = { gsig, segindex }
+  enum {       // u2[3] generic_signature_words = { gsig, param[2] }
     _generic_signature_index_word = 0,
-    _generic_signature_constant_word = 1,
-    _generic_signature_word_count = 2
+    _parametric_initial_parameter_index_word = 1,
+    _parametric_actual_parameter_index_word = 2,
+    _generic_signature_word_count = 3
   };
 
   // Bit vector of signature
@@ -370,17 +371,21 @@ public:
     u2* addr = generic_signature_index_addr();
     *addr = index;
   }
-  int parametric_constant_index() const          {
+  int parametric_constant_index(bool actual = false) const {
     if (has_generic_signature_or_constant()) {
-      return *parametric_constant_index_addr();
+      return parametric_constant_index_addr()[actual ? 1 : 0];
     } else {
       return 0;
     }
   }
-  void set_parametric_constant_index(u2 index)    {
+  void set_parametric_constant_index(bool actual, u2 index)    {
     assert(has_generic_signature_or_constant(), "");
     u2* addr = parametric_constant_index_addr();
-    *addr = index;
+    if (!actual) {
+      addr[1] = addr[0] = index;  // set both for starters
+    } else {
+      addr[1] = index;  // set only the actual; leave initial alone
+    }
   }
 
   // Sizing
