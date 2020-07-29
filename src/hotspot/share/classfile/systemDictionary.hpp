@@ -227,6 +227,10 @@ class EventClassLoad;
   do_klass(VolatileCallSite_klass,                      java_lang_invoke_VolatileCallSite                     ) \
   /* Note: MethodHandle must be first, and VolatileCallSite last in group */                                    \
                                                                                                                 \
+  /* support for constant pool segments */                                                                      \
+  do_klass(SegmentHandle_klass,                         java_lang_invoke_SegmentHandle                        ) \
+  do_klass(SegmentHandle_Info_klass,                    java_lang_invoke_SegmentHandle_Info                   ) \
+                                                                                                                \
   do_klass(AssertionStatusDirectives_klass,             java_lang_AssertionStatusDirectives                   ) \
   do_klass(StringBuffer_klass,                          java_lang_StringBuffer                                ) \
   do_klass(StringBuilder_klass,                         java_lang_StringBuilder                               ) \

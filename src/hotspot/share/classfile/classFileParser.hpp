@@ -275,6 +275,7 @@ class ClassFileParser {
   void setup_segment_maps(int cp_length, TRAPS);
   void find_constant_pool_segments(TRAPS);
   void check_constant_pool_segments(TRAPS);
+  void create_constant_pool_segment_metadata(TRAPS);
 
   void prepend_host_package_name(const InstanceKlass* unsafe_anonymous_host, TRAPS);
   void fix_unsafe_anonymous_class_name(TRAPS);
@@ -293,7 +294,7 @@ class ClassFileParser {
   void set_class_sde_buffer(const char* x, int len)  { _sde_buffer = x; _sde_length = len; }
 
   void create_combined_annotations(TRAPS);
-  void apply_parsed_class_attributes(InstanceKlass* k);  // update k
+  void apply_parsed_class_attributes(InstanceKlass* k, TRAPS);  // update k
   void apply_parsed_class_metadata(InstanceKlass* k, int fields_count, TRAPS);
   void clear_class_metadata();
 
@@ -459,6 +460,7 @@ class ClassFileParser {
 
   void report_assert_property_failure(const char* msg, TRAPS) const PRODUCT_RETURN;
   void report_assert_property_failure(const char* msg, int index, TRAPS) const PRODUCT_RETURN;
+  void report_assert_property_failure(const char* msg, int index, const char* name, TRAPS) const PRODUCT_RETURN;
 
   inline void assert_property(bool b, const char* msg, TRAPS) const {
 #ifdef ASSERT
@@ -472,6 +474,14 @@ class ClassFileParser {
 #ifdef ASSERT
     if (!b) {
       report_assert_property_failure(msg, index, THREAD);
+    }
+#endif
+  }
+
+  inline void assert_property(bool b, const char* msg, int index, const char* name, TRAPS) const {
+#ifdef ASSERT
+    if (!b) {
+      report_assert_property_failure(msg, index, name, THREAD);
     }
 #endif
   }
@@ -492,6 +502,18 @@ class ClassFileParser {
       guarantee_property(property, msg, CHECK);
     } else {
       assert_property(property, msg, CHECK);
+    }
+  }
+
+  inline void check_property(bool property,
+                             const char* msg,
+                             int index,
+                             const char *name,
+                             TRAPS) const {
+    if (_need_verify) {
+      guarantee_property(property, msg, index, name, CHECK);
+    } else {
+      assert_property(property, msg, index, name, CHECK);
     }
   }
 

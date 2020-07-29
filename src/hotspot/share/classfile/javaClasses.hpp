@@ -949,6 +949,44 @@ class java_lang_ref_SoftReference: public java_lang_ref_Reference {
   static void serialize_offsets(SerializeClosure* f) NOT_CDS_RETURN;
 };
 
+
+class java_lang_invoke_SegmentHandle: AllStatic {
+  friend class JavaClasses;
+
+ private:
+  // From java.lang.invoke.SegmentHandle:
+  //        private @Stable final Info     info;            // layout and type information
+  //        private @Stable final Object[] refs;            // resolved references for this segment
+  //        private @Stable final long     vmsegment;       // metaspace address of a ConstantPoolSegment
+  //        private class Info { private Class clazz; }
+  static int _refs_offset;
+  static int _vmsegment_offset;
+  static int _info_offset;
+  static int _info_clazz_offset;  // offset within 'info' sub-object
+
+  static void compute_offsets();
+
+ public:
+  static void serialize_offsets(SerializeClosure* f) NOT_CDS_RETURN;
+  // Accessors
+  static oop            refs(oop segh);
+
+  static jlong     vmsegment(oop segh);
+
+  // Link through Info.clazz field to get Class
+  static oop           clazz(oop segh);
+
+  // Testers
+  static bool is_instance(oop obj);
+
+  // Accessors for code generation:
+  static int refs_offset()       { CHECK_INIT(_refs_offset); }
+  static int vmsegment_offset()  { CHECK_INIT(_vmsegment_offset); }
+  static int info_offset()       { CHECK_INIT(_info_offset); }
+  static int info_clazz_offset() { CHECK_INIT(_info_clazz_offset); }
+};
+
+
 // Interface to java.lang.invoke.MethodHandle objects
 
 class MethodHandleEntry;

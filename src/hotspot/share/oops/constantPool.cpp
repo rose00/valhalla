@@ -78,7 +78,6 @@ void ConstantPool::copy_fields(const ConstantPool* orig) {
   set_minor_version(orig->minor_version());
 
   set_source_file_name_index(orig->source_file_name_index());
-  set_generic_signature_index(orig->generic_signature_index());
 }
 
 #ifdef ASSERT
@@ -122,25 +121,40 @@ void ConstantPool::deallocate_contents(ClassLoaderData* loader_data) {
   set_resolved_klasses(NULL);
 
   if (has_extra()) {
-    ExtraFields* ef = extra();
-
-    MetadataFactory::free_array<jushort>(loader_data, ef->_operands);
-    ef->_operands = NULL;
+    MetadataFactory::free_array<jushort>(loader_data, extra()->_operands);
+    extra()->_operands = NULL;
 
     int segcount = segment_count();
+    Array<CPSegmentInfo*>*&       segment_info_array = extra()->_segment_info_array;
+    Array<ConstantPoolSegment*>*& segment_lists      = extra()->_segment_lists;
 
     int segnum;
     for (segnum = SEG_MIN; segnum < segcount; segnum++) {
-      //@@ free whole list at ef->_segment_lists->at(segnum);
+      ConstantPoolSegment*& head = *segment_lists->adr_at(segnum);
+      while (head != NULL) {
+        // unlink each segment from the list before freeing it:
+        ConstantPoolSegment* seg = head;
+        head = seg->_segment_list_next;
+        seg->_segment_list_next = NULL;
+        //@@ FIXME: deallocate substructures?
+        //MetadataFactory::free_metadata(loader_data, seg);
+      }
     }
-    MetadataFactory::free_array<ConstantPoolSegment*>(loader_data, ef->_segment_lists);
-    ef->_segment_lists = NULL;
+    MetadataFactory::free_array<ConstantPoolSegment*>(loader_data, segment_lists);
+    segment_lists = NULL;
 
     for (segnum = SEG_MIN; segnum < segcount; segnum++) {
-      //@@ free ef->_segment_info_array->at(segnum);
+      CPSegmentInfo* si = segment_info_array->at(segnum);
+      segment_info_array->at_put(segnum, NULL);  // unlink
+      //@@ FIXME: deallocate substructures?
+      //MetadataFactory::free_metadata(loader_data, si);
     }
-    MetadataFactory::free_array<CPSegmentInfo*>(loader_data, ef->_segment_info_array);
-    ef->_segment_info_array = NULL;
+    MetadataFactory::free_array<CPSegmentInfo*>(loader_data, segment_info_array);
+    segment_info_array = NULL;
+
+    //@@ FIXME: deallocate this
+    //MetadataFactory::free_metadata(loader_data, _extra);
+    _extra = NULL;
   }
 
   release_C_heap_structures();
@@ -157,17 +171,31 @@ void ConstantPool::release_C_heap_structures() {
 
 void ConstantPool::ensure_extra(ClassLoaderData* loader_data, TRAPS) {
   if (!has_extra()) {
-    ExtraFields* ef = new(loader_data, ExtraFields::size(), ExtraFields::type(), THREAD) ExtraFields();
+    ExtraFields* extra = new(loader_data, ExtraFields::size(), ExtraFields::type(), THREAD) ExtraFields();
     if (!HAS_PENDING_EXCEPTION) {
-      assert(ef->_operands == NULL, "invariant");
-      assert(ef->_segment_count == 0, "invariant");
-      this->_extra = ef;
+      assert(extra->_operands == NULL, "invariant");
+      assert(extra->_segment_count == 0, "invariant");
+      this->_extra = extra;
     }
   }
 }
 
+void ConstantPool::setup_segment_arrays(ClassLoaderData* loader_data, TRAPS) {
+  int length_of_segment_arrays = SEG_MIN + segment_count();
+
+  extra()->_segment_info_array =
+    MetadataFactory::new_array<CPSegmentInfo*>(loader_data, length_of_segment_arrays, CHECK);
+
+  extra()->_segment_lists =
+    MetadataFactory::new_array<ConstantPoolSegment*>(loader_data, length_of_segment_arrays, CHECK);
+
+  extra()->_constant_to_segment_map =
+    MetadataFactory::new_array<int>(loader_data, length(), CHECK);
+}
+
 inline void ConstantPool::ExtraFields::metaspace_pointers_do(MetaspaceClosure* it) {
   it->push(&_operands);
+  it->push(&_constant_to_segment_map);
   it->push(&_segment_info_array);
   it->push(&_segment_lists, MetaspaceClosure::_writable);
 }

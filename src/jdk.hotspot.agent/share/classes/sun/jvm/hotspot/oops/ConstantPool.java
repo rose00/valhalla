@@ -135,7 +135,7 @@ public class ConstantPool extends Metadata implements ClassConstants {
   public Address           getExtra()      { return extra.getValue(getAddress()); }
   public U2Array           getOperands()   {
       return (getExtra() == null ? null :
-              new U2Array(operands.getValue(getExtra().getAddress())));
+              new U2Array(operands.getValue(getExtra())));
   }
   public ConstantPoolCache getCache()      {
     Address addr = cache.getValue(getAddress());

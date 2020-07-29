@@ -2999,7 +2999,10 @@ void SystemDictionary::invoke_bootstrap_method(BootstrapInfo& bootstrap_specifie
     THROW_MSG(vmSymbols::java_lang_InternalError(), "Invalid bootstrap method invocation with no caller or type argument");
   }
 
-  bool is_indy = bootstrap_specifier.is_method_call();
+  bool is_indy  = bootstrap_specifier.is_method_call();
+  bool is_condy = bootstrap_specifier.is_constant_eval();
+  bool is_upcall = bootstrap_specifier.is_internal_upcall();
+
   objArrayHandle appendix_box;
   if (is_indy) {
     // Some method calls may require an appendix argument.  Arrange to receive it.
@@ -3011,7 +3014,9 @@ void SystemDictionary::invoke_bootstrap_method(BootstrapInfo& bootstrap_specifie
   //       indy: java.lang.invoke.MethodHandleNatives::linkCallSite(caller, indy_index, bsm, name, mtype, info, &appendix)
   JavaCallArguments args;
   args.push_oop(Handle(THREAD, bootstrap_specifier.caller_mirror()));
-  args.push_int(bootstrap_specifier.bss_index());
+  if (!is_upcall) {
+    args.push_int(bootstrap_specifier.bss_index());
+  }
   args.push_oop(bootstrap_specifier.bsm());
   args.push_oop(bootstrap_specifier.name_arg());
   args.push_oop(bootstrap_specifier.type_arg());
@@ -3019,11 +3024,19 @@ void SystemDictionary::invoke_bootstrap_method(BootstrapInfo& bootstrap_specifie
   if (is_indy) {
     args.push_oop(appendix_box);
   }
+  if (is_upcall) {
+    args.push_oop(bootstrap_specifier.extra_ref());
+    args.push_long(bootstrap_specifier.extra_bits());
+  }
   JavaValue result(T_OBJECT);
   JavaCalls::call_static(&result,
                          SystemDictionary::MethodHandleNatives_klass(),
-                         is_indy ? vmSymbols::linkCallSite_name() : vmSymbols::linkDynamicConstant_name(),
-                         is_indy ? vmSymbols::linkCallSite_signature() : vmSymbols::linkDynamicConstant_signature(),
+                         is_indy    ? vmSymbols::linkCallSite_name()
+                         : is_condy ? vmSymbols::linkDynamicConstant_name()
+                         :            vmSymbols::upcall_name(),
+                         is_indy    ? vmSymbols::linkCallSite_signature()
+                         : is_condy ? vmSymbols::linkDynamicConstant_signature()
+                         :            vmSymbols::upcall_signature(),
                          &args, CHECK);
 
   Handle value(THREAD, (oop) result.get_jobject());

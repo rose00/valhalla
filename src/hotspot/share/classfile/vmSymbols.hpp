@@ -329,6 +329,14 @@
   template(setTargetVolatile_name,                    "setTargetVolatile")                        \
   template(setTarget_signature,                       "(Ljava/lang/invoke/MethodHandle;)V")       \
   template(DEFAULT_CONTEXT_name,                      "DEFAULT_CONTEXT")                          \
+  template(refs_name,                                 "refs")                                     \
+  template(info_name,                                 "info")                                     \
+  template(vmsegment_name,                            "vmsegment")                                \
+  template(java_lang_invoke_SegmentHandle,            "java/lang/invoke/SegmentHandle")           \
+  template(java_lang_invoke_SegmentHandle_Info,       "java/lang/invoke/SegmentHandle$Info")      \
+  template(java_lang_invoke_SegmentHandle_Info_signature, "Ljava/lang/invoke/SegmentHandle$Info;") \
+  template(upcall_name,                               "upcall")                                   \
+  template(upcall_signature, "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;J)Ljava/lang/Object;") \
   NOT_LP64(  do_alias(intptr_signature,               int_signature)  )                           \
   LP64_ONLY( do_alias(intptr_signature,               long_signature) )                           \
                                                                                                   \

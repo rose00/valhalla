@@ -48,18 +48,41 @@ BootstrapInfo::BootstrapInfo(const constantPoolHandle& pool, int bss_index, int 
     // derived and eagerly cached:
     _argc(      pool->bootstrap_argument_count_at(bss_index) ),
     _name(      pool->uncached_name_ref_at(bss_index) ),
-    _signature( pool->uncached_signature_ref_at(bss_index) )
+    _signature( pool->uncached_signature_ref_at(bss_index) ),
+    _extra_bits(0)
 {
   _is_resolved = false;
   assert(pool->tag_at(bss_index).has_bootstrap(), "");
-  assert(indy_index == -1 || pool->invokedynamic_bootstrap_ref_index_at(indy_index) == bss_index, "invalid bootstrap specifier index");
+  assert(indy_index != _upcall_index_code, "use other constructor");
+  assert(indy_index == _condy_index_code ||
+         pool->invokedynamic_bootstrap_ref_index_at(indy_index) == bss_index, "invalid bootstrap specifier index");
+  // test some encoding decisions:
+  assert(!ConstantPool::is_invokedynamic_index(_condy_index_code), "");
+  assert(!ConstantPool::is_invokedynamic_index(_upcall_index_code), "");
+  // and for good luck:
+  assert(indy_index != -1, "");  // CPC[0] should not be assigned to an indy!
+}
+
+BootstrapInfo::BootstrapInfo(const constantPoolHandle& pool, int bss_index,
+                             Symbol* name, Handle type_arg, Handle extra_ref, long extra_bits)
+  : _pool(pool),
+    _bss_index(bss_index),
+    _indy_index(_upcall_index_code),
+    _argc(bss_index == _no_bss_index ? 0 : pool->bootstrap_argument_count_at(bss_index)),
+    _name(name),
+    _signature(NULL),
+    _extra_ref(extra_ref),
+    _extra_bits(extra_bits),
+    _type_arg(type_arg)
+{
+  _is_resolved = false;
 }
 
 // If there is evidence this call site was already linked, set the
 // existing linkage data into result, or throw previous exception.
 // Return true if either action is taken, else false.
 bool BootstrapInfo::resolve_previously_linked_invokedynamic(CallInfo& result, TRAPS) {
-  assert(_indy_index != -1, "");
+  assert(is_method_call(), "");
   ConstantPoolCacheEntry* cpce = invokedynamic_cp_cache_entry();
   if (!cpce->is_f1_null()) {
     methodHandle method(     THREAD, cpce->f1_as_method());
@@ -85,6 +108,16 @@ Handle BootstrapInfo::resolve_bsm(TRAPS) {
     return _bsm;
   }
 
+  if (is_internal_upcall() && _bss_index == _no_bss_index) {
+    // this is an internal upcall that doesn't resolve bsm/name/type/args from CP
+    resolve_bss_name_and_type(THREAD);
+    Exceptions::wrap_dynamic_exception(false, CHECK_NH);
+    return Handle();
+  }
+
+  // not internal; a regular condy or indy
+  assert(_signature != NULL && _type_arg.is_null(), "");
+
   bool is_indy = is_method_call();
   // The tag at the bootstrap method index must be a valid method handle or a method handle in error.
   // If it is a MethodHandleInError, a resolution error will be thrown which will be wrapped if necessary
@@ -109,11 +142,15 @@ Handle BootstrapInfo::resolve_bsm(TRAPS) {
 
 // Resolve metadata from the JVM_Dynamic_info or JVM_InvokeDynamic_info's name and type information.
 void BootstrapInfo::resolve_bss_name_and_type(TRAPS) {
-  assert(_bsm.not_null(), "resolve_bsm first");
+  assert(_bsm.not_null() || is_internal_upcall(), "resolve_bsm first");
   Symbol* name = this->name();
   Symbol* type = this->signature();
-  _name_arg = java_lang_String::create_from_symbol(name, CHECK);
-  if (type->char_at(0) == '(') {
+  if (name != NULL) {
+    _name_arg = java_lang_String::create_from_symbol(name, CHECK);
+  }
+  if (type == NULL) {
+    // nothing to do...
+  } else if (type->char_at(0) == '(') {
     _type_arg = SystemDictionary::find_method_handle_type(type, caller(), CHECK);
   } else {
     _type_arg = SystemDictionary::find_java_mirror_for_type(type, caller(), SignatureStream::NCDFError, CHECK);
@@ -206,7 +243,7 @@ void BootstrapInfo::resolve_args(TRAPS) {
 // there must be a LinkageError pending; try to save it and then throw
 bool BootstrapInfo::save_and_throw_indy_exc(TRAPS) {
   assert(HAS_PENDING_EXCEPTION, "");
-  assert(_indy_index != -1, "");
+  assert(is_method_call(), "");
   ConstantPoolCacheEntry* cpce = invokedynamic_cp_cache_entry();
   int encoded_index = ResolutionErrorTable::encode_cpcache_index(_indy_index);
   bool recorded_res_status = cpce->save_and_throw_indy_exc(_pool, _bss_index,
@@ -226,15 +263,19 @@ void BootstrapInfo::print_msg_on(outputStream* st, const char* msg) {
   char what[20];
   st = st ? st : tty;
 
-  if (_indy_index != -1)
+  if (is_method_call())
     sprintf(what, "indy#%d", decode_indy_index());
-  else
+  else if (is_constant_eval())
     sprintf(what, "condy");
+  else if (is_internal_upcall())
+    sprintf(what, "upcall");
+  else
+    sprintf(what, "???#%d", _indy_index);
   bool have_msg = (msg != NULL && strlen(msg) > 0);
   st->print_cr("%s%sBootstrap in %s %s@CP[%d] %s:%s%s BSMS[%d] BSM@CP[%d]%s argc=%d%s",
                 (have_msg ? msg : ""), (have_msg ? " " : ""),
                 caller()->name()->as_C_string(),
-                what,  // "indy#42" or "condy"
+                what,  // "indy#42" or "condy" or "upcall"
                 _bss_index,
                 _name->as_C_string(),
                 _signature->as_C_string(),

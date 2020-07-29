@@ -99,8 +99,9 @@ class ConstantPool : public Metadata {
   friend class VMStructs;
   friend class JVMCIVMStructs;
   friend class BytecodeInterpreter;  // Directly extracts a klass in the pool for fast instanceof/checkcast
+  friend class VM_RedefineClasses;   // access to _extra
   friend class Universe;             // For null constructor
-  friend class CPSegmentInfo;        //@@ for what?
+
  private:
   // If you add a new field that points to any metaspace object, you
   // must add this field to ConstantPool::metaspace_pointers_do().
@@ -108,15 +109,7 @@ class ConstantPool : public Metadata {
   ConstantPoolCache*   _cache;       // the cache holding interpreter runtime information
   InstanceKlass*       _pool_holder; // the corresponding class
 
-  struct ExtraFields : public MetaspaceObj {
-    Array<u2>*         _operands;    // for variable-sized (InvokeDynamic) nodes, usually empty
-    int                _segment_count;
-    Array<CPSegmentInfo*>* _segment_info_array;
-    Array<ConstantPoolSegment*>* _segment_lists;
-    static int size() { return align_up(sizeof(ExtraFields), wordSize) / wordSize; }
-    static MetaspaceObj::Type type() { return ConstantPoolType; }
-    inline void metaspace_pointers_do(MetaspaceClosure* it);
-  };
+  struct ExtraFields;
   ExtraFields*         _extra;       // present if any sub-fields are non-null
 
   // Consider using an array of compressed klass pointers to
@@ -129,9 +122,6 @@ class ConstantPool : public Metadata {
   // Constant pool index to the utf8 entry of the Generic signature,
   // or 0 if none.
   u2              _generic_signature_index;
-  // CONSTANT_Parameter that this class was declared Parametric in,
-  // or 0 if none.
-  u2              _parametric_constant_index;
   // Constant pool index to the utf8 entry for the name of source file
   // containing this klass, 0 if not specified.
   u2              _source_file_name_index;
@@ -163,6 +153,25 @@ class ConstantPool : public Metadata {
   bool has_extra() const                       { return _extra != NULL; }
   ExtraFields* extra() const                   { assert(has_extra(), ""); return _extra; }
   void  ensure_extra(ClassLoaderData* loader_data, TRAPS);
+
+  struct ExtraFields : public MetaspaceObj {
+    Array<u2>*         _operands;    // for variable-sized (InvokeDynamic) nodes, usually empty
+    u2                 _class_generic_signature_index;
+
+    // The rest of these fields support specializable generics...
+    u2                 _segment_count;
+    u2                 _class_parametric_constant_index;
+
+    Array<int>*        _constant_to_segment_map;
+    Array<CPSegmentInfo*>* _segment_info_array;
+    Array<ConstantPoolSegment*>* _segment_lists;
+    int                _parametric_field_count;  //N.B. they can come from the super
+
+    static int size() { return align_up(sizeof(ExtraFields), wordSize) / wordSize; }
+    static MetaspaceObj::Type type() { return ConstantPoolType; }
+    inline void metaspace_pointers_do(MetaspaceClosure* it);
+    DEBUG_ONLY(bool on_stack() { return false; })
+  };
 
   void set_operands(Array<u2>* operands, ClassLoaderData* cld, TRAPS) {
     ensure_extra(cld, CHECK);
@@ -215,7 +224,7 @@ class ConstantPool : public Metadata {
   virtual bool is_constantPool() const      { return true; }
 
   Array<u1>* tags() const                   { return _tags; }
-  Array<u2>* operands() const               { return has_extra() ? _extra->_operands : NULL; }
+  Array<u2>* operands() const               { return has_extra() ? extra()->_operands : NULL; }
 
   bool has_preresolution() const            { return (_flags & _has_preresolution) != 0; }
   void set_has_preresolution() {
@@ -230,14 +239,20 @@ class ConstantPool : public Metadata {
   void set_minor_version(u2 minor_version) { _minor_version = minor_version; }
 
   // generics support
-  Symbol* generic_signature() const {
-    return (_generic_signature_index == 0) ?
-      (Symbol*)NULL : symbol_at(_generic_signature_index);
+  Symbol* class_generic_signature() const {
+    int cgsi = class_generic_signature_index();
+    return (cgsi == 0 ? (Symbol*)NULL : symbol_at(cgsi));
   }
-  u2 generic_signature_index() const                   { return _generic_signature_index; }
-  void set_generic_signature_index(u2 sig_index)       { _generic_signature_index = sig_index; }
-  u2 parametric_constant_index() const                 { return _parametric_constant_index; }
-  void set_parametric_constant_index(u2 pc_index)      { _parametric_constant_index = pc_index; }
+  int class_generic_signature_index() const     { return !has_extra() ? 0 : extra()->_class_generic_signature_index; }
+  int class_parametric_constant_index() const   { return !has_extra() ? 0 : extra()->_class_parametric_constant_index; }
+
+  void set_class_generic_signature_index(int index) { extra()->_class_generic_signature_index = index; }
+  void set_class_parametric_constant_index(int index) { extra()->_class_parametric_constant_index = index; }
+
+  void setup_segment_arrays(ClassLoaderData* loader_data, TRAPS);
+  Array<int>* constant_to_segment_map() const   { return !has_extra() ? NULL : extra()->_constant_to_segment_map; }
+  Array<CPSegmentInfo*>* segment_info_array() const { return !has_extra() ? NULL : extra()->_segment_info_array; }
+  Array<ConstantPoolSegment*>* segment_lists() const { return !has_extra() ? NULL : extra()->_segment_lists; }
 
   // source file name
   Symbol* source_file_name() const {
@@ -322,8 +337,11 @@ class ConstantPool : public Metadata {
   }
 
   // Support for variant segments.
+  friend class CPSegmentInfo;
+  friend class ConstantPoolSegment;
+
+  int segment_count() const                 { return has_extra() ? extra()->_segment_count : 0; }
   bool has_segments() const                 { return segment_count() != 0; }
-  int segment_count() const                 { return has_extra() ? _extra->_segment_count : 0; }
   void set_segment_count(int n, ClassLoaderData* cld, TRAPS) {
     ensure_extra(cld, CHECK);
     extra()->_segment_count = n;
@@ -332,22 +350,36 @@ class ConstantPool : public Metadata {
   static const int SEG_MIN = 1;   // smallest valid segment index
   static const int SEG_NONE = 0;  // non-index for segments, for invariant parts of CP
   // static list of segment info descriptors (#0 not available)
-  CPSegmentInfo* segment_info_at(int n) const {
-    assert(n >= SEG_MIN && n <= segment_count(), "oob");
-    return extra()->_segment_info_array->at(n);
+  CPSegmentInfo* segment_info_at(int segnum) const {
+    assert(segnum >= SEG_MIN && segnum <= segment_count(), "oob");
+    return extra()->_segment_info_array->at(segnum);
   }
   // dynamic list of active segment splits, one per segment kind
   // Note: this is stored separately from the static list of segment descriptors
-  ConstantPoolSegment*& segment_list_head_at(int n) const {
-    assert(n >= SEG_MIN && n <= segment_count(), "oob");
-    return *extra()->_segment_lists->adr_at(n);
+  ConstantPoolSegment*& segment_list_head_at(int segnum) const {
+    assert(segnum >= SEG_MIN && segnum <= segment_count(), "oob");
+    return *extra()->_segment_lists->adr_at(segnum);
   }
+
+  int constant_to_segment_map_at(int index) const {
+    assert(has_segments(), "");
+    return extra()->_constant_to_segment_map->at(index);
+  }
+  int constant_segnum(int index, int& subindex_in_segment) const {
+    int mapping = constant_to_segment_map_at(index);
+    subindex_in_segment = extract_low_short_from_int(mapping);
+    return extract_high_short_from_int(mapping);
+  }
+
+  int parametric_field_count() const { return !has_extra() ? 0 : extra()->_parametric_field_count; }
 
   // Assembly code support
   static int tags_offset_in_bytes()         { return offset_of(ConstantPool, _tags); }
   static int cache_offset_in_bytes()        { return offset_of(ConstantPool, _cache); }
   static int pool_holder_offset_in_bytes()  { return offset_of(ConstantPool, _pool_holder); }
   static int resolved_klasses_offset_in_bytes()    { return offset_of(ConstantPool, _resolved_klasses); }
+  static int extra_offset_in_bytes()        { return offset_of(ConstantPool, _extra); }
+  static int constant_to_segment_map_offset_in_bytes() { return offset_of(ConstantPool::ExtraFields, _constant_to_segment_map); }
 
   // Storing constants
 
@@ -399,9 +431,16 @@ class ConstantPool : public Metadata {
     *int_at_addr(which) = ((jint) name_and_type_index<<16) | bsms_attribute_index;
   }
 
-  void variant_parameter_index_at_put(int which, int bsms_attribute_index, int parent_index) {
+  enum {
+    JVM_PARAM_MIN = JVM_PARAM_Class,
+    JVM_PARAM_MAX = JVM_PARAM_MethodAndClass,
+    JVM_PARAM_MASK = (JVM_PARAM_Class | JVM_PARAM_MethodOnly | JVM_PARAM_MethodAndClass)
+  };
+
+  void variant_parameter_index_at_put(int which, int param_kind, int bsms_attribute_index) {
     tag_at_put(which, JVM_CONSTANT_Parameter);
-    *int_at_addr(which) = ((jint) parent_index<<16) | bsms_attribute_index;
+    // Note: Put BSM index in the same place here as for CONSTANT_*Dynamic: LSW.
+    *int_at_addr(which) = ((jint) param_kind<<16) | bsms_attribute_index;
   }
 
   void variant_linkage_index_at_put(int which, int constant_index, int ref_index) {
@@ -622,7 +661,7 @@ class ConstantPool : public Metadata {
     return *int_at_addr(which);
   }
 
-  int variant_parameter_parent_index_at(int which) {
+  int variant_parameter_kind_at(int which) {
     assert(tag_at(which).is_variant_parameter(), "Corrupted constant pool");
     return extract_high_short_from_int(*int_at_addr(which));
   }

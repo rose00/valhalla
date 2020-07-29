@@ -23,58 +23,34 @@
  */
 
 #include "precompiled.hpp"
-#include "jvm.h"
-#include "classfile/classLoaderData.hpp"  //@@needed?
-#include "classfile/javaClasses.inline.hpp"  //@@needed?
-#include "classfile/metadataOnStackMark.hpp"  //@@needed?
-#include "classfile/stringTable.hpp"  //@@needed?
-#include "classfile/systemDictionary.hpp"  //@@needed?
-#include "classfile/vmSymbols.hpp"  //@@needed?
-#include "interpreter/bootstrapInfo.hpp"  //@@needed?
-#include "interpreter/linkResolver.hpp"  //@@needed?
-#include "logging/log.hpp"  //@@needed?
-#include "logging/logStream.hpp"  //@@needed?
-#include "memory/allocation.inline.hpp"  //@@needed?
-#include "memory/heapShared.hpp"  //@@needed?
-#include "memory/metadataFactory.hpp"  //@@needed?
-#include "memory/metaspaceClosure.hpp"  //@@needed?
-#include "memory/metaspaceShared.hpp"  //@@needed?
-#include "memory/oopFactory.hpp"  //@@needed?
-#include "memory/resourceArea.hpp"  //@@needed?
-#include "memory/universe.hpp"  //@@needed?
-#include "oops/array.hpp"  //@@needed?
-#include "oops/constantPool.inline.hpp"  //@@needed?
-
-#include "oops/cpSegment.hpp"  //@@inline?
-
-#include "oops/cpCache.inline.hpp"  //@@needed?
-#include "oops/instanceKlass.hpp"  //@@needed?
-#include "oops/objArrayKlass.hpp"  //@@needed?
-#include "oops/objArrayOop.inline.hpp"  //@@needed?
-#include "oops/oop.inline.hpp"  //@@needed?
-#include "oops/typeArrayOop.inline.hpp"  //@@needed?
-#include "oops/valueArrayKlass.hpp"  //@@needed?
-#include "runtime/atomic.hpp"  //@@needed?
-#include "runtime/handles.inline.hpp"  //@@needed?
-#include "runtime/init.hpp"  //@@needed?
-#include "runtime/javaCalls.hpp"  //@@needed?
-#include "runtime/signature.hpp"  //@@needed?
-#include "runtime/thread.inline.hpp"  //@@needed?
-#include "runtime/vframe.inline.hpp"  //@@needed?
-#include "utilities/copy.hpp"  //@@needed?
+//#include "interpreter/bootstrapInfo.hpp"
+//#include "logging/log.hpp"
+//#include "logging/logStream.hpp"
+#include "memory/allocation.inline.hpp"
+#include "memory/metadataFactory.hpp"
+#include "memory/metaspaceClosure.hpp"
+#include "memory/oopFactory.hpp"
+#include "memory/resourceArea.hpp"
+#include "oops/array.hpp"
+#include "oops/cpSegment.hpp"
+#include "oops/cpCache.inline.hpp"
+#include "runtime/handles.inline.hpp"
 
 
 // This block holds all constructor arguments and derived sizing information.
 // It is a temporary in the allocator and the sole operand to the constructor.
 // Young knave, I hereby dub thee "Setup Pattern".
 struct CPSegmentInfo::Setup {
+  ClassLoaderData* _loader_data;
   ConstantPool* _pool;
   int _segnum;
-  bool _is_class;
+  int _parameter_index;
+  int _param_kind;
   CPSegmentInfo* _include_class;
   GrowableArray<int>* _fields;
-  GrowableArray<Method*>* _methods;
+  GrowableArray<const Method*>* _methods;
   GrowableArray<int>* _constants;
+  GrowableArray<int> _indexes_and_tags;
 
   // accumulated sizing information:
   size_t _info_offset_in_bytes;
@@ -95,7 +71,6 @@ struct CPSegmentInfo::Setup {
 
   // substructures
   CPSegmentInfo* _info;
-  ConstantPoolSegment* _original;
   OopHandle _refs;
 
 #ifdef ASSERT
@@ -111,14 +86,9 @@ struct CPSegmentInfo::Setup {
     // because it's a local handshake.  But we do need to zero the
     // counters.
     _info = NULL;
-    _original = NULL;
     assert(_refs.resolve() == NULL, "");
     reset_offsets();
     DEBUG_ONLY(_info_size_in_bytes = _segment_size_in_bytes = _refs_length = (size_t)-1);
-  }
-
-  ClassLoaderData* loader_data() {
-    return _pool->pool_holder()->class_loader_data();
   }
 
   size_t info_size_in_words() { return byte_size_to_word_size(_info_size_in_bytes); }
@@ -135,60 +105,141 @@ struct CPSegmentInfo::Setup {
   }
 };
 
+inline int CPSegmentInfo::CInfo::compare_index_and_tag(int it1, int it2) {
+  assert(it1 > 0 && it2 > 0, "");
+  int t1 = (it1 & CInfo::_tag_mask), t2 = (it2 & 0xFF);
+  if (t1 == t2) {
+    return it1 - it2;
+  }
+  switch (t1) {
+  case JVM_CONSTANT_Parameter:  return -1;
+  case JVM_CONSTANT_Linkage:    t1 = 0; break;
+  }
+  switch (t2) {
+  case JVM_CONSTANT_Parameter:  return 1;
+  case JVM_CONSTANT_Linkage:    t2 = 0; break;
+  }
+  return t1 - t2;
+}
+static int compare_index_and_tag(int* it1p, int* it2p) {
+  return CPSegmentInfo::CInfo::compare_index_and_tag(*it1p, *it2p);
+}
+
 inline void CPSegmentInfo::size_and_initialize_passes(bool initialize_pass,
                                                       Setup& s,
                                                       TRAPS) {
-  //@@
+  ConstantPool*     cp              = s._pool;
+  CPSegmentInfo*    info            = s._info;
+  OopHandle&        refs            = s._refs;
+  size_t&           info_offset     = s._info_offset_in_bytes;
+  size_t&           segment_offset  = s._segment_offset_in_bytes;
+  size_t&           refs_offset     = s._refs_offset;
+
+  info_offset    = CPSegmentInfo::header_size() * wordSize;
+  segment_offset = ConstantPoolSegment::header_size() * wordSize;
+  refs_offset    = ConstantPoolSegment::_fixed_ref_limit;
+
+  int constant_count = s._constants->length();
+  if (!initialize_pass) {
+    // sort the constants
+    for (int i = 0; i < constant_count; i++) {
+      int index = s._constants->at(i);
+      int tag = cp->tag_at(index).value();
+      s._indexes_and_tags.push(CInfo::index_and_tag(index, tag));
+    }
+    s._indexes_and_tags.sort(compare_index_and_tag);
+    int it0 = s._indexes_and_tags.at(0);
+    assert(it0 == CInfo::index_and_tag(s._parameter_index, JVM_CONSTANT_Parameter),
+           "correct sort");
+  } else {
+    assert(info->_constant_count == constant_count, "already done");
+  }
+
+  // size each constant
+  for (int i = 0; i < constant_count; i++) {
+    int it = s._indexes_and_tags.at(i);
+    int ssize = 0, nrefs = 0;
+    switch (it & CInfo::_tag_mask) {
+    case JVM_CONSTANT_Parameter:
+      assert(i == 0, "must be");
+      break;
+
+    case JVM_CONSTANT_Linkage:
+    case JVM_CONSTANT_InvokeDynamic:
+    case JVM_CONSTANT_Dynamic:
+    case JVM_CONSTANT_MethodHandle:
+      ssize += wordSize;
+      nrefs += 1;
+      break;
+      
+    default:
+      ShouldNotReachHere();
+    }
+    if (initialize_pass) {
+      CInfo* ci = info->constant_info_at(i);
+      ci->_index_and_tag = it;
+      if (ssize != 0)  ci->_offset_in_meta = segment_offset;
+      ci->_offset_in_meta = segment_offset;
+      if (nrefs != 0)  ci->_offset_in_refs = refs_offset;
+    }
+    segment_offset += ssize;
+    refs_offset    += nrefs;
+  }
+  info_offset += sizeof(CInfo) * constant_count;
+
+  // (Do we need more data after the CInfo?)
 }
 
 inline CPSegmentInfo::CPSegmentInfo(CPSegmentInfo::Setup& s, TRAPS) {
   _pool = s._pool;
   _segnum = s._segnum;
-  _reflen = s.refs_length_as_int();
-  _flags = (s._is_class         ? _has_class_entries
-            : !s._include_class ? _has_method_entries
-            :                     _has_both);
-  _size_in_words = s.info_size_in_words();
-  _original = s._original;
-  _segs_list = NULL;  // no segs in this list, yet, just the blank original
+  _flags = s._param_kind;
+  assert(param_kind() == s._param_kind, "");
+
+  // record sizing:
+  _reflen                = s.refs_length_as_int();
+  _info_size_in_words    = s.info_size_in_words();
+  _segment_size_in_words = s.segment_size_in_words();
+  _constant_count        = s._indexes_and_tags.length();
 
   assert(_reflen >= ConstantPoolSegment::_fixed_ref_limit, "");
 }
 
-inline ConstantPoolSegment::ConstantPoolSegment(CPSegmentInfo::Setup& s, TRAPS) {
-  _info = s._info;
-  _cseg = NULL;  // may be initialized after clone
-  assert(_refs.resolve() == NULL, ""); // initialized after clone
-  _size_in_words = s.segment_size_in_words();
-  _segs_next = NULL;
+ConstantPoolSegment::ConstantPoolSegment(CPSegmentInfo* info,
+                                         ConstantPoolSegment* cseg,
+                                         TRAPS) {
+  _info = info;
+  if (info->is_class()) {
+    // For fast access to the class from every 'has_class' segment,
+    // we plug in the class segment at a known offset.
+    // For the 'is_class' segment itself, we plug in a self-loop.
+    assert(cseg == NULL, "");
+    cseg = this;
+  }
+  _cseg = cseg;   // NULL, or caller-supplied parent, or this segment
+  assert(this->param_kind() == info->param_kind(), "properly encoded in cseg");
+  assert(_segment_list_next == NULL, "0-init");
 }
 
-ConstantPoolSegment::ConstantPoolSegment(const ConstantPoolSegment* original, TRAPS) {
-  assert(original != NULL, "");
-  _info = original->_info;
-  _cseg = NULL;
-  // _cseg, _refs filled in later
-  _size_in_words = original->_size_in_words;
-  _segs_next = NULL;
-  assert(wordSize == sizeof(HeapWord), "");
-  Copy::disjoint_words((HeapWord*) original + header_size(),
-                       (HeapWord*) this     + header_size(),
-                       _size_in_words       - header_size());
-}
-
-CPSegmentInfo* CPSegmentInfo::allocate(ConstantPool* pool,
+CPSegmentInfo* CPSegmentInfo::allocate(ClassLoaderData* loader_data,
+                                       ConstantPool* pool,
                                        int segnum,
-                                       bool is_class,
+                                       int parameter_index,
+                                       int param_kind,
                                        CPSegmentInfo* include_class,
                                        GrowableArray<int>* fields,
-                                       GrowableArray<Method*>* methods,
+                                       GrowableArray<const Method*>* methods,
                                        GrowableArray<int>* constants,
                                        TRAPS) {
+  assert(param_kind >= ConstantPool::JVM_PARAM_MIN &&
+         param_kind <= ConstantPool::JVM_PARAM_MAX, "invalid kind");
   Setup s;
   // (does C++ have a trick to capture the whole argument list?)
+  s._loader_data = loader_data;
   s._pool = pool;
   s._segnum = segnum;
-  s._is_class = is_class;
+  s._parameter_index = parameter_index;
+  s._param_kind = param_kind;
   s._include_class = include_class;
   s._fields = fields;
   s._methods = methods;
@@ -197,19 +248,15 @@ CPSegmentInfo* CPSegmentInfo::allocate(ConstantPool* pool,
   size_and_initialize_passes(false, s, CHECK_NULL);
   s.copy_offsets_to_sizes();
 
-  ClassLoaderData* loader_data = s.loader_data();
 
   // Sizing complete, now allocate metadata blocks and other resources.
-  s._info = new(loader_data, s.info_size_in_words(),
+  s._info = new(s._loader_data, s.info_size_in_words(),
                 CPSegmentInfo::type(), THREAD) CPSegmentInfo(s, CHECK_NULL);
-  s._original = new(loader_data, s.segment_size_in_words(),
-                    ConstantPoolSegment::type(), THREAD) ConstantPoolSegment(s, CHECK_NULL);
 
   DEBUG_ONLY(Setup saved = s);
   s.reset_offsets();
   size_and_initialize_passes(true, s, THREAD);
   assert(saved.same_offsets_as(s), "the passes have to agree");
-  assert(!s._info->_original->is_active(), "");
   return s._info;
 }
 
@@ -231,27 +278,14 @@ ConstantPoolSegment* CPSegmentInfo::create_segment(Handle parameter,
 
   // do the metaspace allocation second, undoing the first if the second fails
   ConstantPoolSegment* seg
-    = new(loader_data, _original->_size_in_words,
-          ConstantPoolSegment::type(), THREAD) ConstantPoolSegment(_original, THREAD);
+    = new(loader_data, _segment_size_in_words,
+          ConstantPoolSegment::type(), THREAD) ConstantPoolSegment(this, cseg, THREAD);
   if (HAS_PENDING_EXCEPTION) {
     loader_data->remove_handle(refs);
     return NULL;
   }
   seg->_refs = refs;
-
-  // fill in _cseg
-  if (is_class()) {
-    assert(cseg == NULL, "");
-    seg->_cseg = seg;  // self-loop, to make fast access from any "has_class" segment
-  } else if (cseg != NULL) {
-    assert(has_class_entries(), "");
-    assert(cseg->is_active(), "");
-    seg->_cseg = cseg;
-  } else {
-    assert(!has_class_entries(), "");
-  }
-
-  assert(seg->is_active(), "");
+  assert(seg->size() == (size_t)_segment_size_in_words, "");
 
   objArrayHandle cplock(Thread::current(), _pool->resolved_references());
   // Use the shared resolved_references() lock for my linked list.
@@ -259,8 +293,9 @@ ConstantPoolSegment* CPSegmentInfo::create_segment(Handle parameter,
   {
     ObjectLocker ol(cplock, THREAD);
     // link it in, so we can find it to clean it up if necessary
-    seg->_segs_next = this->_segs_list;
-    this->_segs_list = seg;
+    ConstantPoolSegment* &head = segment_list_head();
+    seg->_segment_list_next = head;
+    head = seg;
   }
 
   return seg;
@@ -270,14 +305,17 @@ ConstantPoolSegment* CPSegmentInfo::create_segment(Handle parameter,
 void ConstantPoolSegment::metaspace_pointers_do(MetaspaceClosure* it) {
   log_trace(cds)("Iter(ConstantPoolSegment): %p", this);
   it->push(&_info);
-  it->push(&_segs_next);
+  it->push(&_segment_list_next);
   it->push(&_cseg);
+}
+
+ClassLoaderData* CPSegmentInfo::loader_data() const {
+  assert(_pool->pool_holder() != NULL, "class must be properly initialized");
+  return _pool->pool_holder()->class_loader_data();
 }
 
 void CPSegmentInfo::metaspace_pointers_do(MetaspaceClosure* it) {
   log_trace(cds)("Iter(CPSegmentInfo): %p", this);
   it->push(&_pool);
-  it->push(&_segs_list);
-  it->push(&_original);
 }
 

@@ -158,8 +158,10 @@ class FieldInfo {
     }
     ShouldNotReachHere();
     return 0;
- }
+  }
 
+  // Note: a field's allocation type code is a member of the private
+  // enum FieldAllocationType in the classfile parser.
   u2 allocation_type() const {
     u2 lo = _shorts[low_packed_offset];
     switch(lo & FIELDINFO_TAG_TYPE_MASK) {

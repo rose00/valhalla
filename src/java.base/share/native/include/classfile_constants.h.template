@@ -130,6 +130,13 @@ enum {
     JVM_REF_invokeInterface         = 9
 };
 
+/* JVM_CONSTANT_Parameter kinds */
+enum {
+    JVM_PARAM_Class                 = 1,
+    JVM_PARAM_MethodOnly            = 2,
+    JVM_PARAM_MethodAndClass        = 3  // = (1|2) = Class+Method
+};
+
 /* StackMapTable type item numbers */
 
 enum {

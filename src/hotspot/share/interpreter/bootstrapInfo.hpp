@@ -38,6 +38,10 @@ class BootstrapInfo : public StackObj {
   Symbol*     _name;            // extracted from JVM_CONSTANT_NameAndType
   Symbol*     _signature;
 
+  // extra parameters for internal upcalls:
+  Handle      _extra_ref;       // extra ref for some JVM queries
+  jlong       _extra_bits;      // extra bits (e.g., metadata pointer)
+
   // pre-bootstrap resolution state:
   Handle      _bsm;             // resolved bootstrap method
   Handle      _name_arg;        // resolved String
@@ -51,17 +55,37 @@ class BootstrapInfo : public StackObj {
   methodHandle _resolved_method;  // bind this as indy behavior
   Handle      _resolved_appendix; // extra opaque static argument for _resolved_method
 
+  enum {
+    // these codes must not satisfy ConstantPool::is_invokedynamic_index
+    _condy_index_code = 1,
+    _upcall_index_code = 2
+  };
+
  public:
-  BootstrapInfo(const constantPoolHandle& pool, int bss_index, int indy_index = -1);
+  BootstrapInfo(const constantPoolHandle& pool, int bss_index, int indy_index = _condy_index_code);
+
+  enum {
+    // this encodes the absence of a bootstrap specifier:
+    _no_bss_index = 0
+  };
+
+  // This constructor makes an internal upcall with an arbitrary symbolic name and type:
+  BootstrapInfo(const constantPoolHandle& pool, int bss_index,
+                Symbol* name, Handle type_arg, Handle extra_ref, long extra_bits);
 
   // accessors
   const constantPoolHandle& pool() const{ return _pool; }
   int bss_index() const                 { return _bss_index; }
   int indy_index() const                { return _indy_index; }
   int argc() const                      { return _argc; }
-  bool is_method_call() const           { return (_indy_index != -1); }
+  bool is_method_call() const           { return ConstantPool::is_invokedynamic_index(_indy_index); }
+  bool is_internal_upcall() const       { return (_indy_index == _upcall_index_code); }
+  bool is_constant_eval() const         { return (_indy_index == _condy_index_code); }
   Symbol* name() const                  { return _name; }
   Symbol* signature() const             { return _signature; }
+  bool has_bsm() const                  { return _bss_index == _no_bss_index; }
+  Handle extra_ref() const              { return _extra_ref; }
+  jlong extra_bits() const              { return _extra_bits; }
 
   // accessors to lazy state
   Handle bsm() const                    { return _bsm; }
@@ -69,7 +93,7 @@ class BootstrapInfo : public StackObj {
   Handle type_arg() const               { return _type_arg; }
   Handle arg_values() const             { return _arg_values; }
   bool is_resolved() const              { return _is_resolved; }
-  Handle resolved_value() const         { assert(!is_method_call(), ""); return _resolved_value; }
+  Handle resolved_value() const         { assert(is_constant_eval(), ""); return _resolved_value; }
   methodHandle resolved_method() const  { assert(is_method_call(), "");  return _resolved_method; }
   Handle resolved_appendix() const      { assert(is_method_call(), "");  return _resolved_appendix; }
 
@@ -107,7 +131,7 @@ class BootstrapInfo : public StackObj {
     _resolved_value = value;
   }
   void set_resolved_method(methodHandle method, Handle appendix) {
-    assert(!is_resolved() && is_method_call(), "");
+    assert(!is_resolved() && !is_constant_eval(), "");
     _is_resolved = true;
     _resolved_method = method;
     _resolved_appendix = appendix;

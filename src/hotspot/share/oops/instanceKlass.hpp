@@ -300,7 +300,8 @@ class InstanceKlass: public Klass {
     _misc_is_declared_atomic                  = 1 << 19, // implements jl.NonTearable
     _misc_invalid_inline_super                = 1 << 20, // invalid super type for an inline type
     _misc_invalid_identity_super              = 1 << 21, // invalid super type for an identity type
-    _misc_has_injected_identityObject         = 1 << 22  // IdentityObject has been injected by the JVM
+    _misc_has_injected_identityObject         = 1 << 22, // IdentityObject has been injected by the JVM
+    _misc_has_parametric_fields               = 1 << 23  // contains a parametric (variant) field
   };
   u2 shared_loader_type_bits() const {
     return _misc_is_shared_boot_class|_misc_is_shared_platform_class|_misc_is_shared_app_class;
@@ -722,6 +723,9 @@ public:
 
   bool find_local_field_from_offset(int offset, bool is_static, fieldDescriptor* fd) const;
   bool find_field_from_offset(int offset, bool is_static, fieldDescriptor* fd) const;
+  bool contains_parametric_field_index(int pfindex) const;
+  bool find_local_parametric_field_from_index(int pfindex, fieldDescriptor* fd) const;
+  bool find_parametric_field_from_index(int pfindex, fieldDescriptor* fd) const;
 
  private:
   inline static int quick_search(const Array<Method*>* methods, const Symbol* name);
@@ -1043,11 +1047,25 @@ public:
   void set_initial_method_idnum(u2 value)             { _idnum_allocated_count = value; }
 
   // generics support
-  Symbol* generic_signature() const                   { return _constants->generic_signature(); }
-  u2 generic_signature_index() const                  { return _constants->generic_signature_index(); }
-  void set_generic_signature_index(u2 sig_index)      { _constants->set_generic_signature_index(sig_index); }
-  u2 parametric_constant_index() const                { return _constants->parametric_constant_index(); }
-  void set_parametric_constant_index(u2 pc_index)     { _constants->set_parametric_constant_index(pc_index); }
+  Symbol* generic_signature() const                   { return _constants->class_generic_signature(); }
+  int generic_signature_index() const                 { return _constants->class_generic_signature_index(); }
+  int parametric_constant_index() const               { return _constants->class_parametric_constant_index(); }
+
+  // True if this class or any super has one or more parametric fields.
+  // Instances of any such class must be arranged with extra care,
+  // because such fields have sizes and offsets that can vary
+  // from instance to instance.
+  bool has_parametric_fields() const {
+    return (_misc_flags & _misc_has_parametric_fields) != 0;
+  }
+  void set_has_parametric_fields(bool b) {
+    if (b) {
+      _misc_flags |= _misc_has_parametric_fields;
+    } else {
+      _misc_flags &= ~_misc_has_parametric_fields;
+    }
+  }
+  int parametric_field_count() const;      // = constants->extra->parametric_field_count
 
   u2 enclosing_method_data(int offset) const;
   u2 enclosing_method_class_index() const {

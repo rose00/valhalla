@@ -1706,6 +1706,10 @@ jvmtiError VM_RedefineClasses::merge_cp_and_rewrite(
   constantPoolHandle old_cp(THREAD, the_class->constants());
   constantPoolHandle scratch_cp(THREAD, scratch_class->constants());
 
+  if (old_cp->has_extra() || scratch_cp->has_extra()) {
+    merge_cp->ensure_extra(loader_data, CHECK_(JVMTI_ERROR_OUT_OF_MEMORY));
+  }
+
   // If the length changed, the class was redefined out from under us. Return
   // an error.
   if (merge_cp_length != the_class->constants()->length()
@@ -1912,7 +1916,7 @@ bool VM_RedefineClasses::rewrite_cp_refs(InstanceKlass* scratch_class,
   if (generic_signature_index != 0) {
     u2 new_generic_signature_index = find_new_index(generic_signature_index);
     if (new_generic_signature_index != 0) {
-      scratch_class->set_generic_signature_index(new_generic_signature_index);
+      scratch_class->constants()->extra()->_class_generic_signature_index = new_generic_signature_index;
     }
   }
 

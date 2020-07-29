@@ -171,7 +171,7 @@ class AccessFlags {
   bool on_stack() const                 { return (_flags & JVM_ACC_ON_STACK) != 0; }
   bool is_internal() const              { return (_flags & JVM_ACC_FIELD_INTERNAL) != 0; }
   bool is_stable() const                { return (_flags & JVM_ACC_FIELD_STABLE) != 0; }
-  bool is_parametric() const            { return (_flags & JVM_ACC_FIELD_PARAMETRIC) != 0; }
+  bool field_is_parametric() const      { return (_flags & JVM_ACC_FIELD_PARAMETRIC) != 0; }
   bool field_has_generic_signature() const
                                         { return (_flags & JVM_ACC_FIELD_HAS_GENERIC_SIGNATURE) != 0; }
 

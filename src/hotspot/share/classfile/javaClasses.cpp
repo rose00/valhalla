@@ -3781,6 +3781,33 @@ void java_lang_ref_SoftReference::set_clock(jlong value) {
   base->long_field_put(_static_clock_offset, value);
 }
 
+// Support for constant pool segments, specialization, reification
+
+int java_lang_invoke_SegmentHandle::_refs_offset;
+int java_lang_invoke_SegmentHandle::_vmsegment_offset;
+int java_lang_invoke_SegmentHandle::_info_offset;
+int java_lang_invoke_SegmentHandle::_info_clazz_offset;
+
+#define SEGMENTHANDLE_FIELDS_DO(macro) \
+  macro(_refs_offset,      k, vmSymbols::refs_name(),      object_array_signature, false); \
+  macro(_vmsegment_offset, k, vmSymbols::vmsegment_name(), long_signature, false); \
+  macro(_info_offset,      k, vmSymbols::info_name(), java_lang_invoke_SegmentHandle_Info_signature, false); \
+  macro(_info_clazz_offset, info_k, vmSymbols::clazz_name(), class_signature, false)
+
+void java_lang_invoke_SegmentHandle::compute_offsets() {
+  InstanceKlass* k = SystemDictionary::SegmentHandle_klass();
+  InstanceKlass* info_k = SystemDictionary::SegmentHandle_Info_klass();
+  SEGMENTHANDLE_FIELDS_DO(FIELD_COMPUTE_OFFSET);
+}
+
+#if INCLUDE_CDS
+void java_lang_invoke_SegmentHandle::serialize_offsets(SerializeClosure* f) {
+  SEGMENTHANDLE_FIELDS_DO(FIELD_SERIALIZE_OFFSET);
+}
+#endif
+
+//@@
+
 // Support for java_lang_invoke_DirectMethodHandle
 
 int java_lang_invoke_DirectMethodHandle::_member_offset;

@@ -40,6 +40,7 @@
 #include "code/dependencyContext.hpp"
 #include "compiler/compileBroker.hpp"
 #include "gc/shared/collectedHeap.inline.hpp"
+#include "interpreter/bootstrapInfo.hpp"
 #include "interpreter/oopMapCache.hpp"
 #include "interpreter/rewriter.hpp"
 #include "jvmtifiles/jvmti.h"
@@ -56,6 +57,7 @@
 #include "memory/universe.hpp"
 #include "oops/fieldStreams.inline.hpp"
 #include "oops/constantPool.hpp"
+#include "oops/cpSegment.hpp"
 #include "oops/instanceClassLoaderKlass.hpp"
 #include "oops/instanceKlass.inline.hpp"
 #include "oops/instanceMirrorKlass.hpp"
@@ -1159,6 +1161,30 @@ void InstanceKlass::initialize_super_interfaces(TRAPS) {
   }
 }
 
+static Handle fill_in_upcall_segment_data(constantPoolHandle& cp, TRAPS) {
+  int num_segs = cp->segment_count();
+  const int SEG_MIN = ConstantPool::SEG_MIN;
+  typeArrayOop vmsegs = oopFactory::new_longArray(num_segs, THREAD);
+  Handle res(THREAD, vmsegs);
+  ConstantPoolSegment* cseg = NULL;
+  Handle no_param;
+  for (int segnum = SEG_MIN; segnum <= num_segs; segnum++) {
+    CPSegmentInfo* info = cp->segment_info_at(segnum);
+    ConstantPoolSegment* vmseg = NULL;
+    if (info->is_class()) {
+      vmseg = info->new_class_segment(no_param, CHECK_(res));
+      cseg = vmseg;
+    } else if (info->has_both()) {
+      vmseg = info->new_method_segment(no_param, cseg, CHECK_(res));
+    } else {
+      vmseg = info->new_method_segment(no_param, NULL, CHECK_(res));
+    }
+    assert(vmseg->info() == info, "");
+    vmsegs->long_at_put(segnum - SEG_MIN, (jlong) (intptr_t) vmseg);
+  }
+  return res;
+}
+
 void InstanceKlass::initialize_impl(TRAPS) {
   HandleMark hm(THREAD);
 
@@ -1299,7 +1325,26 @@ void InstanceKlass::initialize_impl(TRAPS) {
                              jt->get_thread_stat()->perf_recursion_counts_addr(),
                              jt->get_thread_stat()->perf_timers_addr(),
                              PerfClassTraceTime::CLASS_CLINIT);
-    call_class_initializer(THREAD);
+
+    // Just before <clinit>, call a BSM to reify constant pool segments, if any.
+    if (constants()->has_segments()) {
+      constantPoolHandle i_cp(THREAD, constants());
+      Handle type_arg(THREAD, SystemDictionary::SegmentHandle_klass()->java_mirror());
+      Handle extra_ref = fill_in_upcall_segment_data(i_cp, THREAD);
+      Exceptions::wrap_dynamic_exception(false, THREAD);
+      if (!HAS_PENDING_EXCEPTION) {
+        BootstrapInfo upcall(i_cp,
+                             BootstrapInfo::_no_bss_index, //@@ extract bsm from somewhere
+                             NULL,  // no name string
+                             type_arg, extra_ref, 0);
+        SystemDictionary::invoke_bootstrap_method(upcall, THREAD);
+        Exceptions::wrap_dynamic_exception(false, THREAD);
+      }
+    }
+
+    if (!HAS_PENDING_EXCEPTION) {
+      call_class_initializer(THREAD);
+    }
   }
 
   // Step 10
@@ -1750,6 +1795,37 @@ bool InstanceKlass::find_field_from_offset(int offset, bool is_static, fieldDesc
   return false;
 }
 
+
+int InstanceKlass::parametric_field_count() const {
+  return !has_parametric_fields() ? 0 : constants()->parametric_field_count();
+}
+
+bool InstanceKlass::contains_parametric_field_index(int pfindex) const {
+  return pfindex >= 0 && pfindex < parametric_field_count();
+}
+
+bool InstanceKlass::find_local_parametric_field_from_index(int pfindex, fieldDescriptor* fd) const {
+  for (JavaFieldStream fs(this); !fs.done(); fs.next()) {
+    if (fs.offset() == pfindex && fd->is_parametric()) {
+      fd->reinitialize(const_cast<InstanceKlass*>(this), fs.index());
+    }
+  }
+  return false;
+}
+
+bool InstanceKlass::find_parametric_field_from_index(int pfindex, fieldDescriptor* fd) const {
+  Klass* klass = const_cast<InstanceKlass*>(this);
+  while (klass != NULL) {
+    if (pfindex >= InstanceKlass::cast(klass)->parametric_field_count()) {
+      break;
+    }
+    if (InstanceKlass::cast(klass)->find_local_parametric_field_from_index(pfindex, fd)) {
+      return true;
+    }
+    klass = klass->super();
+  }
+  return false;
+}
 
 void InstanceKlass::methods_do(void f(Method* method)) {
   // Methods aren't stable until they are loaded.  This can be read outside

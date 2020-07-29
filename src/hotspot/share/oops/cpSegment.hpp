@@ -25,20 +25,9 @@
 #ifndef SHARE_OOPS_CPSEGMENT_HPP
 #define SHARE_OOPS_CPSEGMENT_HPP
 
-//@@ #include "oops/constantPool.hpp"
-//@@ the following lines are copied from constantPool.hpp:
-#include "memory/allocation.hpp"  //@@needed?
-#include "oops/arrayOop.hpp"  //@@needed?
-#include "oops/cpCache.hpp"  //@@needed?
-#include "oops/objArrayOop.hpp"  //@@needed?
-#include "oops/oopHandle.hpp"  //@@needed?
-#include "oops/symbol.hpp"  //@@needed?
-#include "oops/typeArrayOop.hpp"  //@@needed?
-#include "runtime/handles.hpp"  //@@needed?
-#include "utilities/align.hpp"  //@@needed?
-#include "utilities/bytes.hpp"  //@@needed?
-#include "utilities/constantTag.hpp"  //@@needed?
+#include "oops/constantPool.hpp"
 
+class ConstantPool;
 class ConstantPoolSegment;
 
 // These are built once at class load time, one per variant segment,
@@ -46,24 +35,25 @@ class ConstantPoolSegment;
 // They do not contain constants, but rather provide templates for any
 // variant segments that may be created in the future.
 class CPSegmentInfo : public MetaspaceObj {
+ public:
+  struct CInfo;
+ private:
+
   // If you add a new field that points to any metaspace object, you
   // must add this field to CPSegmentInfo::metaspace_pointers_do().
 
-  ConstantPool*         _pool;      // back pointer to my owner
-  int                   _segnum;    // 1-based index identifying this kind of segment
-  int                   _reflen;    // length of _refs array for this segment kind
-  int                   _flags;     // (see below)
-  size_t                _size_in_words;
-  ConstantPoolSegment*  _original;  // blank copy, to be cloned by create
-  ConstantPoolSegment*  _segs_list; // list of active instances (of this info/shape)
+  ConstantPool* _pool;                  // back pointer to my owner
+  int           _segnum;                // 1-based index identifying this kind of segment
+  int           _flags;                 // bits in JVM_PARAM_MASK
+  int           _reflen;                // length of _refs array for this segment kind
+  int           _info_size_in_words;    // my own size
+  int           _segment_size_in_words; // size of each of my segments
+  int           _constant_count;        // number of constants in this segment
 
   friend class ConstantPoolSegment;
 
-  enum {      // for _flags field
-    _has_class_entries   = 1,
-    _has_method_entries  = 2,
-    _has_both            = (_has_class_entries | _has_method_entries)
-  };
+  //intptr_t* base() const { return (intptr_t*) (((char*) this) + sizeof(CPSegmentInfo)); }
+  intptr_t* base() const { return (intptr_t*)this + header_size(); }
 
   ConstantPoolSegment* create_segment(Handle parameter,
                                       ConstantPoolSegment* cseg,
@@ -71,14 +61,43 @@ class CPSegmentInfo : public MetaspaceObj {
 
  public:
 
-  ConstantPool* pool() const              { return _pool; }
-  int segnum() const                      { return _segnum; }
-  bool has_class_entries() const          { return (_flags & _has_class_entries) != 0; }
-  bool has_method_entries() const         { return (_flags & _has_method_entries) != 0; }
-  bool has_both_kinds_of_entry() const    { return (_flags & _has_both) == _has_both; }
-  bool is_method() const                  { return has_method_entries(); }
-  bool is_class() const                   { return !has_method_entries(); }
-  ClassLoaderData* loader_data() const    { return _pool->pool_holder()->class_loader_data(); }
+  ConstantPool* pool() const            { return _pool; }
+  int segnum() const                    { return _segnum; }
+  int param_kind() const                { return (_flags & ConstantPool::JVM_PARAM_MASK); }
+  bool is_class() const                 { return param_kind() == JVM_PARAM_Class; }
+  bool is_method_only() const           { return param_kind() == JVM_PARAM_MethodOnly; }
+  bool is_method_and_class() const      { return param_kind() == JVM_PARAM_MethodAndClass; }
+  // Plain but ambiguous 'is_method' is omitted, to avoid bugs.  Use 'has_method'.
+  bool has_class() const                { return !is_method_only(); }
+  bool has_method() const               { return !is_class(); }
+  bool has_both() const                 { return is_method_and_class(); }
+  ClassLoaderData* loader_data() const; // = _pool->pool_holder()->class_loader_data();
+
+  int    constant_info_count() const { return _constant_count; }
+  CInfo* constant_info_base() const  { return (CInfo*)base(); }
+  CInfo* constant_info_end() const   { return constant_info_base() + constant_info_count(); }
+  CInfo* constant_info_at(int subidx) const {
+    assert(subidx >= 0 && subidx < constant_info_count(), "oob");
+    return &constant_info_base()[subidx];
+  }
+  static const int _parameter_subindex = 0;  // fixed sub-index for lead parameter in CInfo array
+
+  // Info about one constant in this segment:
+  struct CInfo {
+    int _index_and_tag;       // (index << 8) | tag
+    int _offset_in_meta;      // location of data in the ConstantPoolSegment
+    int _offset_in_refs;      // location in ConstantPoolSegment::_refs
+
+    static const int _index_shift = 8, _tag_mask = (1 << _index_shift) - 1;
+    static int index_and_tag(int index, int tag) {
+      assert((tag & 0xFF) == tag, "");
+      assert((index & ((unsigned int)-1 >> (_index_shift+1))) == index, "");
+      return (index << _index_shift) | tag;
+    }
+    int index() const { return _index_and_tag >> _index_shift; }
+    int tag() const   { return _index_and_tag & _tag_mask; }
+    static inline int compare_index_and_tag(int it1, int it2);
+  };
 
   // Segment creation:
   ConstantPoolSegment* new_class_segment(Handle parameter,
@@ -89,30 +108,39 @@ class CPSegmentInfo : public MetaspaceObj {
   ConstantPoolSegment* new_method_segment(Handle parameter,
                                           ConstantPoolSegment* cseg,
                                           TRAPS) {
-    assert(is_method(), "must match");
-    assert((cseg != NULL) == has_both_kinds_of_entry(), "must match");
+    assert(has_method(), "must match");
+    assert((cseg != NULL) == has_both(), "must match");
     return create_segment(parameter, cseg, THREAD);
   }
 
   // Iteration support:
+  ConstantPoolSegment*& segment_list_head() const {
+    return _pool->segment_list_head_at(_segnum);
+  }
   ConstantPoolSegment* first_seg() const {
-    return _segs_list;
+    return segment_list_head();
   }
   inline ConstantPoolSegment* next_seg(ConstantPoolSegment* seg) const;
 
   // MetaspaceObj functions
   void metaspace_pointers_do(MetaspaceClosure* iter);
   static MetaspaceObj::Type type()        { return ConstantPoolSegmentInfoType; }
-  size_t size() const                     { return _size_in_words; }
-  size_t header_size() { return align_up(sizeof(CPSegmentInfo), wordSize) / wordSize; }
-  static CPSegmentInfo* allocate(ConstantPool* pool,
+  size_t size() const                     { return _info_size_in_words; }
+  DEBUG_ONLY(bool on_stack() { return false; })
+  static size_t header_size() { return align_up(sizeof(CPSegmentInfo), wordSize) / wordSize; }
+  static CPSegmentInfo* allocate(ClassLoaderData* loader_data,
+                                 ConstantPool* pool,
                                  int segnum,
-                                 bool is_class,
+                                 int parameter_index,
+                                 int param_kind,
                                  CPSegmentInfo* include_class,
                                  GrowableArray<int>* fields,
-                                 GrowableArray<Method*>* methods,
+                                 GrowableArray<const Method*>* methods,
                                  GrowableArray<int>* constants,
                                  TRAPS);
+  // used via the _info link from ConstantPoolSegment:
+  size_t segment_size_in_words() const    { return _segment_size_in_words; }
+
  private:
   struct Setup;  // local scratch in same file as allocate();
   inline CPSegmentInfo(Setup& setup, TRAPS);  // local handshake in same file as allocate()
@@ -135,9 +163,8 @@ class ConstantPoolSegment : public MetaspaceObj {
   // must add this field to ConstantPoolSegment::metaspace_pointers_do().
   CPSegmentInfo*        _info;      // description of this segment's shape
   ConstantPoolSegment*  _cseg;      // anywhere inside Foo<x>, points to Foo<x>
-  OopHandle             _refs;      // array containing all oops stored for this segment
-  size_t                _size_in_words;
-  ConstantPoolSegment*  _segs_next; // next in list of active instances (of same info/shape)
+  OopHandle             _refs;      // array containing all resolved oops; specialized segments only
+  ConstantPoolSegment*  _segment_list_next; // next in list of active instances (of same info/shape)
 
   // Note: We could cache more stuff here, but it would directly
   // increase footprint.  Don't cache any derived values here unless
@@ -145,21 +172,23 @@ class ConstantPoolSegment : public MetaspaceObj {
   // can handle the extra indirections.
 
   enum {   // fixed offsets in the refs array, of required oops
-    _argument_ref_index         = 0,   // binding of CONSTANT_Parameter
-    _reflector_ref_index        = 1,   // segment reflector object (if different)
-    _fixed_ref_limit            = 2
+    _argument_ref_index         = 0,   // binding of CONSTANT_Parameter (any object)
+    _handle_ref_index           = 1,   // jli.SegmentHandle reflecting this CP segment
+    _cseg_refs_ref_index        = 2,   // refs array for enclosing class segment (or null if none)
+    _fixed_ref_limit            = 3
   };
 
   // local handshakes with CPSegmentInfo()
-  inline ConstantPoolSegment(CPSegmentInfo::Setup& setup, TRAPS);
-  inline ConstantPoolSegment(const ConstantPoolSegment* original, TRAPS);
+  inline ConstantPoolSegment(CPSegmentInfo* info, ConstantPoolSegment* cseg, TRAPS);
 
  public:
-  bool is_class_segment() const           { return _cseg == this; }
-  bool is_method_segment() const          { return _cseg != this; }
-  bool has_class_segment() const          { return _cseg != NULL; }
-  ConstantPoolSegment* class_segment()    { assert(has_class_segment(), ""); return _cseg; }
-  bool is_active() const                  { return _refs.peek() != NULL; }
+  int param_kind() const                  { return (is_class()  ? JVM_PARAM_Class :
+                                                    has_class() ? JVM_PARAM_MethodAndClass :
+                                                    JVM_PARAM_MethodOnly); }
+  bool is_class() const                   { return _cseg == this; }
+  bool has_method() const                 { return _cseg != this; }
+  bool has_class() const                  { return _cseg != NULL; }
+  ConstantPoolSegment* class_segment()    { assert(has_class(), ""); return _cseg; }
 
   CPSegmentInfo* info() const             { return _info; }
   ConstantPool* pool() const              { return _info->pool(); }
@@ -167,21 +196,40 @@ class ConstantPoolSegment : public MetaspaceObj {
   ClassLoaderData* loader_data() const    { return _info->loader_data(); }
 
   objArrayOop refs() const                { return objArrayOop(_refs.resolve()); }
-  oop ref_at(int i) const                 { return refs()->obj_at(i); }
-  void ref_at_put(int i, oop obj) const   { refs()->obj_at_put(i, obj); }
+  bool has_refs() const                   { return refs() != NULL; }
+  oop  ref_at(int i) const                { assert(has_refs(), ""); return refs()->obj_at(i); }
+  void ref_at_put(int i, oop obj) const   { assert(has_refs(), ""); refs()->obj_at_put(i, obj); }
 
-  oop argument() const {  //binding for this segment's CONSTANT_Parameter
+  bool is_specialized() const             { return has_refs(); }
+
+#if 0
+  // The following accesses would only apply to specialized segments.
+  // Use jli.SegmentHandle for uniform access to both kinds.
+  oop argument() const { // binding of CONSTANT_Parameter (any object)
     return ref_at(_argument_ref_index);
   }
-  oop reflector() const {  //reflector object for this segment (may be same as argument)
-    return ref_at(_reflector_ref_index);
+  oop handle() const {   // jli.SegmentHandle reflecting this CP segment
+    return ref_at(_handle_ref_index);
   }
+  objArrayOop cseg_refs() const {  // bindings for enclosing class segment, or NULL
+    oop cseg_refs = ref_at(_cseg_refs_ref_index);
+    if (cseg_refs == NULL)  return NULL;
+    assert(cseg_refs->is_objArray(), "");
+    return objArrayOop(cseg_refs);
+  }
+  oop cseg_handle() const {  // binding for parent segment's CONSTANT_Parameter
+    objArrayOop refs = cseg_refs();
+    if (refs == NULL)  return NULL;
+    return refs->obj_at(_handle_ref_index);
+  }
+#endif
 
   // MetaspaceObj functions
   void metaspace_pointers_do(MetaspaceClosure* iter);
   static MetaspaceObj::Type type()        { return ConstantPoolSegmentType; }
-  size_t size() const                     { return _size_in_words; }
-  size_t header_size() { return align_up(sizeof(ConstantPoolSegment), wordSize) / wordSize; }
+  size_t size() const                     { return _info->_segment_size_in_words; }
+  static size_t header_size() { return align_up(sizeof(ConstantPoolSegment), wordSize) / wordSize; }
+  DEBUG_ONLY(bool on_stack() { return false; })
   static ConstantPoolSegment* allocate(TRAPS);
 
   // Assembly code support
@@ -192,7 +240,7 @@ class ConstantPoolSegment : public MetaspaceObj {
 
 inline ConstantPoolSegment* CPSegmentInfo::next_seg(ConstantPoolSegment* seg) const {
   assert(seg != NULL && seg->_info == this, "");
-  return seg->_segs_next;
+  return seg->_segment_list_next;
 }
 
 #endif // SHARE_OOPS_CPSEGMENT_HPP

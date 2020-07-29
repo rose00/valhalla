@@ -265,6 +265,7 @@ class MetaspaceObj {
   //   MetaspaceObj::Type type() const { return <This>Type; }
   //
   // Within the sub-hierarchy of Metadata, these are virtuals.
+  // Elsewhere in the hierarchy of MetaspaceObj, type and/or size can be static if constant.
 
   friend class VMStructs;
   // When CDS is enabled, all shared metaspace objects are mapped

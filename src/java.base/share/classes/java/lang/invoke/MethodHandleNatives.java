@@ -358,6 +358,45 @@ class MethodHandleNatives {
         }
     }
 
+    // this implements a generic "internal upcall" from the JVM
+    // the other upcalls may be re-implemented in terms of this one
+    static Object upcall(Object contextObj,  // e.g., a Class to trust
+                         Object actionObj,   // e.g., a BSM to call
+                         Object nameObj,     // e.g., an indy name
+                         Object typeObj,     // e.g., a condy type
+                         Object args,        // e.g., indy BSS argv
+                         Object extraRef,    // extra argument (e.g., result box)
+                         long   extraBits    // 64 extra bits, unboxed
+                         ) {
+        Class<?> contextClass = (Class<?>) contextObj;
+        if (false) //@@FIXME
+        if (typeObj == SegmentHandle.class) {
+            // this upcall builds SegmentHandle runtime objects for parametric constants
+            assert(actionObj == null);  //@@ fill in BSM later
+            long[] vmsegs = (long[]) extraRef;
+            SegmentHandle[] segs = new SegmentHandle[vmsegs.length];
+            SegmentHandle cseg = null;
+            for (int i = 0; i < vmsegs.length; i++) {
+                long vmseg = vmsegs[i];
+                if (vmseg == 0)  continue;
+                SegmentHandle seg = SegmentHandle
+                    .makeInitialPrototype(contextClass, vmseg, cseg);
+                segs[i] = seg;
+                // maybe record this seg as a future parent:
+                if (seg.isClass())  cseg = seg;
+            }
+            //@@ FIXME: We need a composite object to hold segs and
+            // handle various upcalls; should be created by a BSM
+            // defined by the compiler of contextClass.
+            return segs;
+        }
+        System.out.println("NYI"+java.util.Arrays.asList
+                           (contextObj, actionObj,
+                            nameObj, typeObj,
+                            args, extraRef, extraBits));
+        return null;
+    }
+
     /** The JVM is requesting pull-mode bootstrap when it provides
      *  a tuple of the form int[]{ argc, vmindex }.
      *  The BSM is expected to call back to the JVM using the caller

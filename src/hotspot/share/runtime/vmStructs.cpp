@@ -210,12 +210,13 @@ typedef HashtableEntry<InstanceKlass*, mtClass>  KlassHashtableEntry;
   nonstatic_field(ConstantPool,                _pool_holder,                                  InstanceKlass*)                        \
   nonstatic_field(ConstantPool,                _extra,                                        ConstantPool::ExtraFields*)            \
   nonstatic_field(ConstantPool::ExtraFields,   _operands,                                     Array<u2>*)                            \
-  nonstatic_field(ConstantPool::ExtraFields,   _segment_count,                                int)                                   \
+  nonstatic_field(ConstantPool::ExtraFields,   _segment_count,                                u2)                                    \
+  nonstatic_field(ConstantPool::ExtraFields,   _class_generic_signature_index,                u2)                                    \
+  nonstatic_field(ConstantPool::ExtraFields,   _class_parametric_constant_index,              u2)                                    \
   nonstatic_field(ConstantPool,                _resolved_klasses,                             Array<Klass*>*)                        \
   nonstatic_field(ConstantPool,                _length,                                       int)                                   \
   nonstatic_field(ConstantPool,                _minor_version,                                u2)                                    \
   nonstatic_field(ConstantPool,                _major_version,                                u2)                                    \
-  nonstatic_field(ConstantPool,                _generic_signature_index,                      u2)                                    \
   nonstatic_field(ConstantPool,                _source_file_name_index,                       u2)                                    \
   nonstatic_field(ConstantPoolCache,           _resolved_references,                          OopHandle)                             \
   nonstatic_field(ConstantPoolCache,           _reference_map,                                Array<u2>*)                            \
